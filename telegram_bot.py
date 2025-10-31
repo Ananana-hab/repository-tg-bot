@@ -140,8 +140,8 @@ Confidence: LOW
     
     async def subscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Подписка на уведомления"""
-        message = update.message if update.message else update.callback_query.message
-        user_id = update.effective_user.id
+        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
         
         self.db.update_subscription(user_id, True)
         self.update_user_setting(user_id, 'notifications', True)
@@ -158,8 +158,8 @@ Confidence: LOW
     
     async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отписка от уведомлений"""
-        message = update.message if update.message else update.callback_query.message
-        user_id = update.effective_user.id
+        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
         
         self.db.update_subscription(user_id, False)
         self.update_user_setting(user_id, 'notifications', False)
@@ -171,8 +171,8 @@ Confidence: LOW
     
     async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Настройки пользователя"""
-        message = update.message if update.message else update.callback_query.message
-        user_id = update.effective_user.id
+        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
+        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
         
         settings = self.get_user_settings(user_id)
         

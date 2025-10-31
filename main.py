@@ -170,10 +170,17 @@ class BTCPumpDumpBot:
         
         self.telegram_bot.setup_handlers()
         
-        # Запускаем polling
+        # Запускаем polling (современный async способ)
         await self.telegram_bot.app.initialize()
         await self.telegram_bot.app.start()
-        await self.telegram_bot.app.updater.start_polling()
+        
+        # PTB v21+: Application.start_polling(); PTB v20: fallback на updater.start_polling()
+        if hasattr(self.telegram_bot.app, 'start_polling'):
+            await self.telegram_bot.app.start_polling()
+        elif hasattr(self.telegram_bot.app, 'updater') and getattr(self.telegram_bot.app, 'updater'):
+            await self.telegram_bot.app.updater.start_polling()
+        else:
+            logger.error("No polling method available on Application. Please verify PTB version.")
         
         logger.info("Telegram bot started and polling...")
     
