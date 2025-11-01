@@ -4,6 +4,7 @@ import config
 import logging
 from database import Database
 from datetime import datetime
+import asyncio
 
 logging.basicConfig(level=config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -23,7 +24,8 @@ class TelegramBot:
             self.user_settings[user_id] = {
                 'notifications': True,
                 'min_probability': 70,
-                'signal_types': ['PUMP', 'DUMP']  # Какие сигналы показывать
+                'signal_types': ['PUMP', 'DUMP'],  # Какие сигналы показывать
+                'mode': 'swing'  # 'swing' | 'day'
             }
         return self.user_settings[user_id]
     
@@ -179,12 +181,15 @@ Confidence: LOW
         notif_status = "ВКЛ ✅" if settings['notifications'] else "ВЫКЛ ❌"
         signal_types_text = ", ".join(settings['signal_types']) if settings['signal_types'] else "Нет"
         
+        mode_text = settings.get('mode', 'swing').upper()
+
         settings_text = f"""
 ⚙️ Настройки бота
 
 🔔 Уведомления: {notif_status}
 📊 Минимальная вероятность: {settings['min_probability']}%
 🎯 Типы сигналов: {signal_types_text}
+ 🕒 Режим: {mode_text}
 
 Нажмите на кнопку чтобы изменить:
 """
@@ -192,7 +197,8 @@ Confidence: LOW
         keyboard = [
             [InlineKeyboardButton(f"🔔 Уведомления: {notif_status}", callback_data='toggle_notifications')],
             [InlineKeyboardButton(f"📊 Мин. вероятность: {settings['min_probability']}%", callback_data='set_threshold')],
-            [InlineKeyboardButton(f"🎯 Типы сигналов: {signal_types_text}", callback_data='signal_types')]
+            [InlineKeyboardButton(f"🎯 Типы сигналов: {signal_types_text}", callback_data='signal_types')],
+            [InlineKeyboardButton(f"🕒 Режим: {mode_text}", callback_data='toggle_mode')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -389,6 +395,10 @@ Confidence: LOW
             elif data == 'signal_types':
                 await self.handle_signal_types(query, user_id)
             
+            # Настройки - переключение режима анализа
+            elif data == 'toggle_mode':
+                await self.handle_toggle_mode(query, user_id)
+            
             # Настройки - переключение PUMP сигналов
             elif data == 'toggle_pump':
                 await self.handle_toggle_signal_type(query, user_id, 'PUMP')
@@ -404,6 +414,14 @@ Confidence: LOW
         except Exception as e:
             logger.error(f"Error in button_callback: {e}", exc_info=True)
             await query.answer("Произошла ошибка. Попробуйте снова.")
+
+    async def handle_toggle_mode(self, query, user_id):
+        """Переключает режим анализа: swing <-> day"""
+        settings = self.get_user_settings(user_id)
+        new_mode = 'day' if settings.get('mode', 'swing') == 'swing' else 'swing'
+        self.update_user_setting(user_id, 'mode', new_mode)
+        await query.answer(f"Режим: {new_mode.upper()}")
+        await self.settings_command(query, None)
     
     async def send_signal_to_users(self, prediction, market_data, indicators):
         """
@@ -446,33 +464,41 @@ BTC/USDT
 ⚠️ Это не финансовый совет!
 """
         
-        # Отправляем пользователям с учётом их настроек
-        sent_count = 0
+        # Отправляем пользователям с учётом их настроек (троттлинг и батчинг)
+        sem = asyncio.Semaphore(config.TELEGRAM_QPS)  # ограничение сообщений/сек
+        tasks = []
+        sent_counter = {'count': 0}
+
+        async def _safe_send(uid, txt):
+            async with sem:
+                try:
+                    await self.app.bot.send_message(chat_id=uid, text=txt)
+                    sent_counter['count'] += 1
+                except Exception as e:
+                    logger.error(f"Error sending to user {uid}: {e}")
+
         for user_id in users:
-            try:
-                # Проверяем настройки пользователя
-                settings = self.get_user_settings(user_id)
-                
-                # Пропускаем если уведомления выключены
-                if not settings.get('notifications', True):
-                    continue
-                
-                # Пропускаем если вероятность ниже порога
-                min_prob = settings.get('min_probability', 70)
-                if prediction['probability'] * 100 < min_prob:
-                    continue
-                
-                # Пропускаем если тип сигнала не выбран
-                signal_types = settings.get('signal_types', ['PUMP', 'DUMP'])
-                if prediction['signal'] not in signal_types:
-                    continue
-                
-                await self.app.bot.send_message(chat_id=user_id, text=message)
-                sent_count += 1
-            except Exception as e:
-                logger.error(f"Error sending to user {user_id}: {e}")
-        
-        logger.info(f"Signal sent to {sent_count}/{len(users)} users")
+            # Проверяем настройки пользователя
+            settings = self.get_user_settings(user_id)
+            if not settings.get('notifications', True):
+                continue
+            min_prob = settings.get('min_probability', 70)
+            if prediction['probability'] * 100 < min_prob:
+                continue
+            signal_types = settings.get('signal_types', ['PUMP', 'DUMP'])
+            if prediction['signal'] not in signal_types:
+                continue
+
+            tasks.append(_safe_send(user_id, message))
+
+        # Выполняем задачами батчами, сглаживая пики
+        batch_size = config.TELEGRAM_BATCH_SIZE
+        for i in range(0, len(tasks), batch_size):
+            await asyncio.gather(*tasks[i:i + batch_size])
+            if i + batch_size < len(tasks):
+                await asyncio.sleep(1)
+
+        logger.info(f"Signal sent to {sent_counter['count']}/{len(users)} users")
         
         # Сохраняем сигнал в БД
         self.db.save_signal(

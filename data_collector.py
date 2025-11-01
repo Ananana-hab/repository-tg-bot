@@ -14,6 +14,8 @@ class DataCollector:
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
         })
+        # Кэш для FNG
+        self._fng_cache = {'value': None, 'ts': None}
         
     def get_current_price(self):
         """Получает текущую цену BTC/USDT"""
@@ -83,21 +85,40 @@ class DataCollector:
             int: Значение от 0 (Extreme Fear) до 100 (Extreme Greed)
         """
         try:
-            response = requests.get(config.FEAR_GREED_API, timeout=10)
+            now = datetime.now()
+            # Кэш TTL 5 минут
+            if self._fng_cache['ts'] and (now - self._fng_cache['ts']).seconds < 300:
+                return self._fng_cache['value']
+
+            # Ретраи через Session + HTTPAdapter
+            session = requests.Session()
+            try:
+                adapter = requests.adapters.HTTPAdapter(max_retries=3)
+                session.mount('https://', adapter)
+                session.mount('http://', adapter)
+            except Exception:
+                pass
+
+            response = session.get(config.FEAR_GREED_API, timeout=5)
             data = response.json()
             
+            value = None
             if data and 'data' in data and len(data['data']) > 0:
                 value = int(data['data'][0]['value'])
                 classification = data['data'][0]['value_classification']
-                
                 logger.info(f"Fear & Greed Index: {value} ({classification})")
-                return value
-            
-            return None
+
+            if value is None:
+                # fallback значение
+                value = 50
+
+            self._fng_cache = {'value': value, 'ts': now}
+            return value
             
         except Exception as e:
             logger.error(f"Error fetching Fear & Greed Index: {e}")
-            return None
+            # Возвращаем кэш или дефолт
+            return self._fng_cache['value'] if self._fng_cache['value'] is not None else 50
     
     def get_24h_stats(self):
         """Получает статистику за 24 часа"""
@@ -134,7 +155,7 @@ class DataCollector:
         change = ((current_price - past_price) / past_price) * 100
         return round(change, 2)
     
-    def get_market_data(self):
+    def get_market_data(self, timeframe=None, limit=None):
         """
         Собирает все необходимые данные для анализа
         
@@ -144,7 +165,9 @@ class DataCollector:
         logger.info("Collecting market data...")
         
         # Получаем OHLCV данные
-        df = self.get_ohlcv_data(timeframe=config.TIMEFRAME, limit=100)
+        tf = timeframe or config.TIMEFRAME
+        lm = limit or 100
+        df = self.get_ohlcv_data(timeframe=tf, limit=lm)
         if df is None:
             return None
         

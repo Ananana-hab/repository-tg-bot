@@ -8,6 +8,7 @@ from telegram_bot import TelegramBot
 from database import Database
 import time
 from datetime import datetime
+import random
 
 # Настройка логирования
 logging.basicConfig(
@@ -31,9 +32,82 @@ class BTCPumpDumpBot:
         
         self.last_signal = None
         self.last_signal_time = None
+        # Режим анализа: 'swing' | 'day'
+        self.current_mode = 'swing'
+        self._mode_lock = asyncio.Lock()
         
         logger.info("BTCPumpDumpBot initialized")
     
+    def _get_params_for_mode(self, mode: str):
+        """Возвращает параметры сбора данных под режим."""
+        if mode == 'day':
+            return {'timeframe': config.DAY_TIMEFRAME, 'limit': config.DAY_LIMIT}
+        return {'timeframe': config.TIMEFRAME, 'limit': 100}
+
+    async def analyze_market_with_mode(self, mode: str):
+        """
+        Анализ рынка с параметрами, зависящими от режима
+        """
+        try:
+            params = self._get_params_for_mode(mode)
+            logger.info("=" * 50)
+            logger.info(f"Starting market analysis (mode={mode})...")
+            
+            # 1. Собираем данные c учётом режима
+            market_data = self.data_collector.get_market_data(
+                timeframe=params['timeframe'],
+                limit=params['limit']
+            )
+            if not market_data:
+                logger.error("Failed to collect market data")
+                return None
+            
+            # 2. Рассчитываем индикаторы
+            indicators = TechnicalIndicators.calculate_all_indicators(
+                market_data['df'],
+                orderbook=market_data.get('orderbook')
+            )
+            if not indicators:
+                logger.error("Failed to calculate indicators")
+                return None
+            
+            # Добавляем fear & greed к индикаторам
+            indicators['fear_greed'] = market_data['fear_greed']
+            
+            # 3. Делаем прогноз
+            prediction = self.ml_predictor.predict(indicators, market_data)
+            
+            # 4. Определяем силу сигнала
+            signal_strength = TechnicalIndicators.get_signal_strength(
+                indicators,
+                market_data['price_change_1h']
+            )
+            
+            # 5. Сохраняем данные в БД
+            self.db.save_price_data(
+                market_data['current_price'],
+                market_data['current_volume'],
+                indicators
+            )
+            
+            result = {
+                'market_data': market_data,
+                'indicators': indicators,
+                'prediction': prediction,
+                'signal_strength': signal_strength,
+                'timestamp': datetime.now(),
+                'mode': mode
+            }
+            
+            logger.info(f"Analysis complete: {prediction['signal']} ({prediction['probability']:.2%})")
+            logger.info(f"Current price: ${market_data['current_price']:,.2f}")
+            logger.info(f"RSI: {indicators['rsi']:.2f}, MACD crossover: {indicators['macd_crossover']}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error in market analysis (mode={mode}): {e}", exc_info=True)
+            return None
+
     async def analyze_market(self):
         """
         Основная функция анализа рынка
@@ -52,7 +126,10 @@ class BTCPumpDumpBot:
                 return None
             
             # 2. Рассчитываем индикаторы
-            indicators = TechnicalIndicators.calculate_all_indicators(market_data['df'])
+            indicators = TechnicalIndicators.calculate_all_indicators(
+                market_data['df'],
+                orderbook=market_data.get('orderbook')
+            )
             if not indicators:
                 logger.error("Failed to calculate indicators")
                 return None
@@ -143,15 +220,20 @@ class BTCPumpDumpBot:
         
         while True:
             try:
-                # Анализируем рынок
-                analysis_result = await self.analyze_market()
+                # Определяем режим под lock и анализируем рынок
+                async with self._mode_lock:
+                    mode = self.current_mode
+                analysis_result = await self.analyze_market_with_mode(mode)
                 
                 # Проверяем и отправляем сигналы
                 await self.check_and_send_signal(analysis_result)
                 
-                # Ждём следующей проверки
-                logger.info(f"Waiting {config.CHECK_INTERVAL} seconds until next check...")
-                await asyncio.sleep(config.CHECK_INTERVAL)
+                # Ждём следующей проверки (джиттер, отдельный базовый интервал для day)
+                base_interval = config.CHECK_INTERVAL if mode != 'day' else config.DAY_CHECK_INTERVAL
+                jitter = random.randint(-3, 3)
+                sleep_s = max(5, base_interval + jitter)
+                logger.info(f"Waiting {sleep_s} seconds until next check (mode={mode})...")
+                await asyncio.sleep(sleep_s)
                 
             except KeyboardInterrupt:
                 logger.info("Monitoring loop stopped by user")

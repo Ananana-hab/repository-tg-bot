@@ -182,6 +182,56 @@ class MLPredictor:
             score += 1
         else:
             score -= 1
+
+        # VWAP side
+        try:
+            vwap = indicators.get('vwap')
+            current_price = market_data.get('current_price')
+            if vwap is not None and current_price is not None:
+                if current_price > vwap:
+                    score += 1
+                    reasons.append("Цена выше VWAP")
+                else:
+                    score -= 1
+                    reasons.append("Цена ниже VWAP")
+        except Exception:
+            pass
+
+        # Orderbook imbalance
+        try:
+            ob = indicators.get('orderbook_imbalance', 0.0)
+            if ob > config.OB_IMBALANCE_THRESHOLD:
+                score += 1
+                reasons.append("Дисбаланс стакана в пользу бидов")
+            elif ob < -config.OB_IMBALANCE_THRESHOLD:
+                score -= 1
+                reasons.append("Дисбаланс стакана в пользу асков")
+        except Exception:
+            pass
+
+        # Strong volume spike reinforcement
+        try:
+            if indicators.get('volume_ratio', 1.0) > config.VOLUME_SPIKE_RATIO:
+                if score > 0:
+                    score += 1
+                    reasons.append("Сильный всплеск объёма поддерживает рост")
+                elif score < 0:
+                    score -= 1
+                    reasons.append("Сильный всплеск объёма поддерживает падение")
+        except Exception:
+            pass
+
+        # ATR low-volatility clamp
+        try:
+            atr = indicators.get('atr')
+            cp = market_data.get('current_price')
+            if atr is not None and cp is not None:
+                low_atr_threshold = config.ATR_LOW_RATIO * cp
+                if atr < low_atr_threshold and abs(score) > 1:
+                    score = 1 if score > 0 else -1
+                    reasons.append("Низкая волатильность (ATR) — ограничение силы сигнала")
+        except Exception:
+            pass
         
         # Определяем сигнал
         if score >= 4:

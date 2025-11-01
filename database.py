@@ -20,6 +20,13 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
+        # Режим WAL и параметры надёжности/скорости
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA synchronous=NORMAL;")
+        except Exception as e:
+            logger.warning(f"PRAGMA setup failed: {e}")
+
         # Таблица для хранения исторических данных
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS price_data (
@@ -61,6 +68,14 @@ class Database:
                 joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Индексы для ускорения выборок
+        try:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_price_data_ts ON price_data(timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_signals_ts_type ON signals(timestamp, signal_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_subscribed ON users(subscribed)')
+        except Exception as e:
+            logger.warning(f"Index creation failed: {e}")
         
         conn.commit()
         conn.close()

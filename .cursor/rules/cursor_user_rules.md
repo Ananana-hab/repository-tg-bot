@@ -28,3 +28,5 @@ Python/Async specifics for this repo:
 - Use single logging initialization in `main.py`. Do not call `basicConfig` in modules.
 - SQLite: recommend WAL mode and short-lived connections; show exact pragmas when relevant.
 - If suggesting data improvements, propose ccxt.pro (WebSocket) as optional for low latency.
+ - BTC-only scope. Do not suggest adding altcoins unless asked.
+ - Do not start coding changes until I explicitly approve the plan.
