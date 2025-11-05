@@ -27,8 +27,9 @@ class BTCPumpDumpBot:
     def __init__(self):
         self.data_collector = DataCollector()
         self.ml_predictor = MLPredictor()
-        self.telegram_bot = TelegramBot(config.TELEGRAM_BOT_TOKEN)
+        self.telegram_bot = TelegramBot(config.TELEGRAM_BOT_TOKEN, main_bot=self)
         self.db = Database()
+        
         
         self.last_signal = None
         self.last_signal_time = None
@@ -37,6 +38,13 @@ class BTCPumpDumpBot:
         self._mode_lock = asyncio.Lock()
         
         logger.info("BTCPumpDumpBot initialized")
+
+    def set_trading_mode(self, mode):
+        if mode not in ['swing', 'day']:
+            return False
+        self.current_mode = mode
+        logger.info(f"🔄 Trading mode changed: {mode.upper()}")
+        return True
     
     def _get_params_for_mode(self, mode: str):
         """Возвращает параметры сбора данных под режим."""

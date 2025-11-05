@@ -80,12 +80,46 @@ class TechnicalIndicators:
     
     @staticmethod
     def calculate_vwap(df):
-        """Расчёт VWAP (Volume Weighted Average Price) для текущего окна df"""
-        typical_price = (df['high'] + df['low'] + df['close']) / 3
-        cum_tp_vol = (typical_price * df['volume']).cumsum()
-        cum_vol = df['volume'].cumsum()
-        vwap_series = cum_tp_vol / (cum_vol.replace(0, pd.NA))
-        return float(vwap_series.iloc[-1])
+        """
+        Расчёт VWAP (Volume Weighted Average Price) с защитой от NaN
+        
+        ✅ ИСПРАВЛЕНО: Добавлена защита от деления на 0 и проверка на NaN
+        """
+        try:
+            if df is None or len(df) == 0:
+                logger.warning("VWAP: DataFrame is empty")
+                return None
+            
+            # Проверка наличия необходимых колонок
+            required_cols = ['high', 'low', 'close', 'volume']
+            if not all(col in df.columns for col in required_cols):
+                logger.warning("VWAP: Missing required columns")
+                return None
+            
+            typical_price = (df['high'] + df['low'] + df['close']) / 3
+            cum_tp_vol = (typical_price * df['volume']).cumsum()
+            cum_vol = df['volume'].cumsum()
+            
+            # ✅ Защита от деления на 0
+            final_vol = cum_vol.iloc[-1]
+            if final_vol == 0 or pd.isna(final_vol):
+                logger.warning("VWAP: Cumulative volume is zero or NaN")
+                return None
+            
+            # Вычисляем VWAP без replace (чтобы избежать NaN)
+            vwap_series = cum_tp_vol / cum_vol
+            result = float(vwap_series.iloc[-1])
+            
+            # ✅ Проверка на NaN и Infinity
+            if not np.isfinite(result):
+                logger.warning(f"VWAP returned invalid value: {result}")
+                return None
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error calculating VWAP: {e}")
+            return None
 
     @staticmethod
     def orderbook_imbalance(orderbook):
@@ -96,13 +130,24 @@ class TechnicalIndicators:
         try:
             if not orderbook or not orderbook.get('bids') or not orderbook.get('asks'):
                 return 0.0
+            
             bid_vol = sum(b[1] for b in orderbook['bids'])
             ask_vol = sum(a[1] for a in orderbook['asks'])
             total = bid_vol + ask_vol
+            
             if total == 0:
                 return 0.0
-            return float((bid_vol - ask_vol) / total)
-        except Exception:
+            
+            imbalance = float((bid_vol - ask_vol) / total)
+            
+            # Проверка на валидность
+            if not np.isfinite(imbalance):
+                return 0.0
+            
+            return imbalance
+            
+        except Exception as e:
+            logger.error(f"Error calculating orderbook imbalance: {e}")
             return 0.0
 
     @staticmethod
@@ -197,10 +242,10 @@ class TechnicalIndicators:
             # ATR
             atr = TechnicalIndicators.calculate_atr(df, 14)
 
-            # VWAP (intraday anchor)
+            # ✅ VWAP (исправленный - может вернуть None)
             vwap = TechnicalIndicators.calculate_vwap(df)
 
-            # Orderbook imbalance (requires orderbook)
+            # Orderbook imbalance (безопасный - всегда возвращает число)
             ob_imbalance = TechnicalIndicators.orderbook_imbalance(orderbook) if orderbook else 0.0
             
             indicators = {
@@ -219,15 +264,15 @@ class TechnicalIndicators:
                 'is_high_volume': volume_data['is_high'],
                 'momentum': momentum,
                 'atr': atr,
-                'vwap': vwap,
+                'vwap': vwap,  # ✅ Может быть None - это нормально!
                 'orderbook_imbalance': ob_imbalance
             }
             
-            logger.info(f"Indicators calculated: RSI={rsi:.2f}, MACD crossover={macd_data['crossover']}")
+            logger.info(f"Indicators calculated: RSI={rsi:.2f}, MACD crossover={macd_data['crossover']}, VWAP={'OK' if vwap else 'None'}")
             return indicators
             
         except Exception as e:
-            logger.error(f"Error calculating indicators: {e}")
+            logger.error(f"Error calculating indicators: {e}", exc_info=True)
             return None
     
     @staticmethod

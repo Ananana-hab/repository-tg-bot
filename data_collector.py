@@ -55,7 +55,7 @@ class DataCollector:
             
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            logger.info(f"Fetched {len(df)} candles for {config.SYMBOL}")
+            logger.info(f"Fetched {len(df)} candles for {config.SYMBOL} ({timeframe})")
             return df
             
         except Exception as e:
@@ -79,7 +79,7 @@ class DataCollector:
     
     def get_fear_greed_index(self):
         """
-        Получает Fear & Greed Index из Alternative.me API
+        Получает Fear & Greed Index из Alternative.me API с кэшированием
         
         Returns:
             int: Значение от 0 (Extreme Fear) до 100 (Extreme Greed)
@@ -88,6 +88,7 @@ class DataCollector:
             now = datetime.now()
             # Кэш TTL 5 минут
             if self._fng_cache['ts'] and (now - self._fng_cache['ts']).seconds < 300:
+                logger.debug(f"Using cached F&G: {self._fng_cache['value']}")
                 return self._fng_cache['value']
 
             # Ретраи через Session + HTTPAdapter
@@ -111,6 +112,7 @@ class DataCollector:
             if value is None:
                 # fallback значение
                 value = 50
+                logger.warning("F&G returned None, using default: 50")
 
             self._fng_cache = {'value': value, 'ts': now}
             return value
@@ -118,7 +120,13 @@ class DataCollector:
         except Exception as e:
             logger.error(f"Error fetching Fear & Greed Index: {e}")
             # Возвращаем кэш или дефолт
-            return self._fng_cache['value'] if self._fng_cache['value'] is not None else 50
+            cached_value = self._fng_cache['value']
+            if cached_value is not None:
+                logger.warning(f"Using cached F&G value: {cached_value}")
+                return cached_value
+            else:
+                logger.warning("No cache available, using default: 50")
+                return 50
     
     def get_24h_stats(self):
         """Получает статистику за 24 часа"""
@@ -147,10 +155,15 @@ class DataCollector:
             float: Процент изменения цены
         """
         if df is None or len(df) < periods:
+            logger.warning(f"Not enough data for price change calculation: {len(df) if df is not None else 0} < {periods}")
             return 0
         
         current_price = df['close'].iloc[-1]
         past_price = df['close'].iloc[-periods]
+        
+        if past_price == 0:
+            logger.warning("Past price is 0, cannot calculate change")
+            return 0
         
         change = ((current_price - past_price) / past_price) * 100
         return round(change, 2)
@@ -159,24 +172,55 @@ class DataCollector:
         """
         Собирает все необходимые данные для анализа
         
+        ✅ ИСПРАВЛЕНО: Динамический расчёт периодов в зависимости от таймфрейма
+        
+        Args:
+            timeframe: Таймфрейм свечей (опционально, берётся из config)
+            limit: Количество свечей (опционально, по умолчанию 100)
+        
         Returns:
             dict: Полный набор данных для ML модели
         """
         logger.info("Collecting market data...")
         
-        # Получаем OHLCV данные
+        # Используем переданный таймфрейм или из config
         tf = timeframe or config.TIMEFRAME
         lm = limit or 100
+        
+        # ✅ Динамический расчёт периодов в зависимости от таймфрейма
+        timeframe_minutes = {
+            '1m': 1,
+            '3m': 3,
+            '5m': 5,
+            '15m': 15,
+            '30m': 30,
+            '1h': 60,
+            '2h': 120,
+            '4h': 240,
+            '1d': 1440
+        }
+        
+        tf_min = timeframe_minutes.get(tf, 5)  # Default 5m если неизвестный
+        
+        # Рассчитываем периоды для 1h и 4h
+        periods_1h = max(1, 60 // tf_min)   # Защита от деления на 0
+        periods_4h = max(1, 240 // tf_min)
+        
+        logger.info(f"Timeframe: {tf} ({tf_min} min), Periods: 1h={periods_1h}, 4h={periods_4h}")
+        
+        # Получаем OHLCV данные
         df = self.get_ohlcv_data(timeframe=tf, limit=lm)
         if df is None:
+            logger.error("Failed to fetch OHLCV data")
             return None
         
         # Текущая цена и объем
         current = self.get_current_price()
         if current is None:
+            logger.error("Failed to fetch current price")
             return None
         
-        # Fear & Greed Index
+        # Fear & Greed Index (с кэшем)
         fear_greed = self.get_fear_greed_index()
         
         # 24h статистика
@@ -185,9 +229,9 @@ class DataCollector:
         # Orderbook
         orderbook = self.get_orderbook()
         
-        # Изменение цены
-        price_change_1h = self.calculate_price_change(df, periods=12)  # 12 * 5min = 1h
-        price_change_4h = self.calculate_price_change(df, periods=48)  # 48 * 5min = 4h
+        # ✅ Изменение цены с правильными периодами
+        price_change_1h = self.calculate_price_change(df, periods=periods_1h)
+        price_change_4h = self.calculate_price_change(df, periods=periods_4h)
         
         market_data = {
             'df': df,
@@ -198,8 +242,16 @@ class DataCollector:
             'price_change_1h': price_change_1h,
             'price_change_4h': price_change_4h,
             'stats_24h': stats_24h,
-            'orderbook': orderbook
+            'orderbook': orderbook,
+            # ✅ Метаданные для отладки
+            'timeframe': tf,
+            'timeframe_minutes': tf_min,
+            'periods_1h': periods_1h,
+            'periods_4h': periods_4h
         }
         
-        logger.info(f"Market data collected: Price=${current['price']:.2f}, Change 1h={price_change_1h}%")
+        logger.info(f"Market data collected: Price=${current['price']:,.2f}, "
+                    f"Change 1h={price_change_1h}% ({periods_1h} periods), "
+                    f"Change 4h={price_change_4h}% ({periods_4h} periods)")
+        
         return market_data
