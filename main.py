@@ -209,6 +209,14 @@ class BTCPumpDumpBot:
         # Отправляем сигнал
         logger.info(f"🚨 Sending {prediction['signal']} signal to users!")
         
+        # Сохраняем сигнал в БД
+        self.db.save_signal(
+            signal_type=prediction['signal'],
+            probability=prediction['probability'],
+            price=analysis_result['market_data']['current_price'],
+            confidence=prediction['confidence']
+        )
+        
         await self.telegram_bot.send_signal_to_users(
             prediction,
             analysis_result['market_data'],

@@ -35,6 +35,34 @@ class TelegramBot:
         settings = self.get_user_settings(user_id)
         settings[key] = value
         self.user_settings[user_id] = settings
+
+    async def send_with_retry(self, chat_id, text, reply_markup=None, max_retries=3):
+        """
+        Отправляет сообщение с поддержкой повторных попыток
+        
+        Args:
+            chat_id: ID чата
+            text: текст сообщения
+            reply_markup: разметка клавиатуры (опционально)
+            max_retries: максимальное количество попыток
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                async with Application.builder().token(self.token).build() as app:
+                    return await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                logger.error(f"Failed to send message after {max_retries} attempts: {e}")
+                raise last_error
         
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -72,13 +100,13 @@ class TelegramBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+        await self.send_with_retry(chat_id=update.message.chat_id, text=welcome_text, reply_markup=reply_markup)
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /status - показывает текущий анализ"""
         message = update.message if update.message else update.callback_query.message
         
-        await message.reply_text("🔄 Анализирую рынок, подождите...")
+        await self.send_with_retry(chat_id=message.chat_id, text="🔄 Анализирую рынок, подождите...")
         
         # TODO: Здесь будет вызов реального анализа из main.py
         status_text = f"""
@@ -98,157 +126,178 @@ class TelegramBot:
 Вероятность: 55%
 Confidence: LOW
 
-⏰ Обновлено: {datetime.now().strftime('%H:%M:%S UTC')}
-"""
+⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+        """
         
-        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data='cmd_status')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await message.reply_text(status_text, reply_markup=reply_markup)
+        await self.send_with_retry(chat_id=message.chat_id, text=status_text)
     
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показывает статистику точности сигналов"""
-        message = update.message if update.message else update.callback_query.message
-        
-        accuracy = self.db.get_signal_accuracy(days=7)
-        
-        if not accuracy:
-            stats_text = """
-📊 Статистика за последние 7 дней
-
-Пока недостаточно данных для расчёта точности.
-Бот только начал работу! 🚀
-
-Подпишись на сигналы: /subscribe
-"""
-        else:
-            pump_acc = accuracy.get('PUMP', 0)
-            dump_acc = accuracy.get('DUMP', 0)
+        """Показывает статистику сигналов"""
+        try:
+            message = update.message if update.message else update.callback_query.message
             
-            stats_text = f"""
-📊 Статистика за последние 7 дней
+            # Получаем статистику из БД
+            stats = self.db.get_signals_stats(days=30)
+            if not stats:
+                await self.send_with_retry(
+                    chat_id=message.chat_id,
+                    text="⚠️ Ошибка получения статистики"
+                )
+                return
 
-🚀 PUMP сигналы: {pump_acc:.1f}% точность
-📉 DUMP сигналы: {dump_acc:.1f}% точность
+            total_signals = sum(s['count'] for s in stats.values())
+            if total_signals == 0:
+                await self.send_with_retry(
+                    chat_id=message.chat_id,
+                    text="📊 Статистика пока недоступна - нет сигналов за последние 30 дней"
+                )
+                return
 
-Общая точность: {(pump_acc + dump_acc) / 2:.1f}%
+            stats_text = "📊 Статистика сигналов за месяц:\n\n"
+            
+            for signal_type, data in stats.items():
+                count = data['count']
+                if count > 0:
+                    avg_prob = data['avg_probability']
+                    high_conf = data['high_confidence']
+                    
+                    stats_text += f"{signal_type} сигналы:\n"
+                    stats_text += f"• Количество: {count}\n"
+                    stats_text += f"• Средняя вероятность: {avg_prob:.1%}\n"
+                    stats_text += f"• Высокая уверенность: {high_conf:.1f}%\n"
+                    stats_text += "\n"
 
-⏰ Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}
-"""
-        
-        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data='cmd_stats')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await message.reply_text(stats_text, reply_markup=reply_markup)
+            stats_text += f"📈 Всего сигналов: {total_signals}\n"
+            stats_text += f"⏰ {datetime.now().strftime('%H:%M:%S UTC')}"
+
+            await self.send_with_retry(chat_id=message.chat_id, text=stats_text)
+
+        except Exception as e:
+            logger.error(f"Error in stats command: {e}")
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="❌ Произошла ошибка при получении статистики"
+            )
     
     async def subscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Подписка на уведомления"""
-        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
-        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
+        """Подписывает пользователя на уведомления"""
+        message = update.message if update.message else update.callback_query.message
+        user_id = update.effective_user.id
         
-        self.db.update_subscription(user_id, True)
-        self.update_user_setting(user_id, 'notifications', True)
-        
-        await message.reply_text(
-            "✅ Вы подписаны на сигналы!\n\n"
-            "Вы будете получать уведомления когда:\n"
-            "• Обнаружен сильный сигнал PUMP/DUMP\n"
-            "• Вероятность выше 70%\n"
-            "• Confidence уровень HIGH или MEDIUM\n\n"
-            "Используйте /unsubscribe чтобы отписаться.\n"
-            "Настройте параметры: /settings"
-        )
+        # Обновляем настройки
+        settings = self.get_user_settings(user_id)
+        if settings['notifications']:
+            text = "❗️ Вы уже подписаны на уведомления"
+        else:
+            settings['notifications'] = True
+            self.user_settings[user_id] = settings
+            text = """
+✅ Вы успешно подписались на уведомления!
+
+Теперь вы будете получать:
+• PUMP/DUMP сигналы
+• Важные новости
+• Технический анализ
+
+Используйте /settings для настройки параметров
+"""
+        await self.send_with_retry(chat_id=message.chat_id, text=text)
     
     async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отписка от уведомлений"""
-        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
-        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
-        
-        self.db.update_subscription(user_id, False)
-        self.update_user_setting(user_id, 'notifications', False)
-        
-        await message.reply_text(
-            "❌ Вы отписались от сигналов.\n\n"
-            "Используйте /subscribe чтобы подписаться снова."
-        )
-    
-    async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Настройки пользователя"""
-        message = update.message if hasattr(update, 'message') and update.message else update.callback_query.message
-        user_id = update.effective_user.id if hasattr(update, 'effective_user') and update.effective_user else update.from_user.id
+        """Отписывает пользователя от уведомлений"""
+        message = update.message if update.message else update.callback_query.message
+        user_id = update.effective_user.id
         
         settings = self.get_user_settings(user_id)
+        if not settings['notifications']:
+            text = "❗️ Вы уже отписаны от уведомлений"
+        else:
+            settings['notifications'] = False
+            self.user_settings[user_id] = settings
+            text = "✅ Вы успешно отписались от уведомлений"
+            
+        await self.send_with_retry(chat_id=message.chat_id, text=text)
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает справку по боту"""
+        help_text = """
+🤖 Помощь по использованию бота
+
+📊 Основные команды:
+/start - Перезапустить бота
+/status - Текущий анализ BTC
+/stats - Статистика сигналов
+/subscribe - Включить уведомления
+/unsubscribe - Отключить уведомления 
+/settings - Настройки уведомлений
+/help - Это сообщение
+
+⚙️ Настройки (/settings):
+• Включение/отключение уведомлений
+• Минимальная вероятность сигнала
+• Выбор типов сигналов (PUMP/DUMP)
+• Выбор режима (Swing/Day)
+
+💡 Совет:
+Используйте настройки для фильтрации 
+сигналов под вашу стратегию
+
+⚠️ Внимание:
+Бот использует технический анализ и ML.
+Все сигналы носят рекомендательный характер.
+Торгуйте с умом и на свой страх и риск!
+"""
+        await self.send_with_retry(chat_id=update.message.chat_id, text=help_text)
+    
+    async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает меню настроек"""
+        if isinstance(update, Update):
+            message = update.message if update.message else update.callback_query.message
+            user_id = update.effective_user.id
+        else:
+            # Если вызвано из callback
+            message = update.message
+            user_id = update.from_user.id
+            
+        settings = self.get_user_settings(user_id)
+        notifications = "✅" if settings['notifications'] else "❌"
+        min_prob = settings['min_probability']
+        signal_types = ", ".join(settings['signal_types'])
+        mode = settings.get('mode', 'swing').upper()
         
-        notif_status = "ВКЛ ✅" if settings['notifications'] else "ВЫКЛ ❌"
-        signal_types_text = ", ".join(settings['signal_types']) if settings['signal_types'] else "Нет"
-        
-        mode_text = settings.get('mode', 'swing').upper()
+        text = f"""
+⚙️ Настройки
 
-        settings_text = f"""
-⚙️ Настройки бота
+🔔 Уведомления: {notifications}
+🎯 Мин. вероятность: {min_prob}%
+📊 Типы сигналов: {signal_types}
+📈 Режим: {mode}
 
-🔔 Уведомления: {notif_status}
-📊 Минимальная вероятность: {settings['min_probability']}%
-🎯 Типы сигналов: {signal_types_text}
-🕒 Режим: {mode_text}
-
-Нажмите на кнопку чтобы изменить:
+Выберите параметр для изменения:
 """
         
         keyboard = [
-            [InlineKeyboardButton(f"🔔 Уведомления: {notif_status}", callback_data='toggle_notifications')],
-            [InlineKeyboardButton(f"📊 Мин. вероятность: {settings['min_probability']}%", callback_data='set_threshold')],
-            [InlineKeyboardButton(f"🎯 Типы сигналов: {signal_types_text}", callback_data='signal_types')],
-            [InlineKeyboardButton(f"🕒 Режим: {mode_text}", callback_data='toggle_mode')]
+            [InlineKeyboardButton(f"🔔 Уведомления ({notifications})", callback_data='toggle_notifications')],
+            [InlineKeyboardButton(f"🎯 Мин. вероятность ({min_prob}%)", callback_data='set_threshold')],
+            [InlineKeyboardButton("📊 Типы сигналов", callback_data='signal_types')],
+            [InlineKeyboardButton(f"📈 Режим ({mode})", callback_data='toggle_mode')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await message.reply_text(settings_text, reply_markup=reply_markup)
-    
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Помощь и информация"""
-        help_text = """
-❓ Помощь по боту
-
-📊 Что означают сигналы:
-
-🚀 PUMP - Прогноз роста цены
-• HIGH confidence: 80%+ вероятность
-• MEDIUM confidence: 65-80% вероятность
-• LOW confidence: менее 65%
-
-📉 DUMP - Прогноз падения цены
-• Аналогично PUMP сигналам
-
-⚪️ NEUTRAL - Нет четкого тренда
-• Боковое движение или неопределённость
-
-🔍 Индикаторы:
-• RSI - индекс относительной силы
-• MACD - схождение/расхождение средних
-• Bollinger Bands - полосы Боллинджера
-• Volume - анализ объёмов
-• Fear & Greed - индекс страха и жадности
-
-⚠️ Важно:
-• Это не финансовый совет
-• Всегда проводите свой анализ
-• Используйте стоп-лоссы
-• Не вкладывайте больше, чем можете потерять
-
-📞 Контакты:
-Если нашли баг или есть предложения - напишите разработчику.
-"""
-        
-        await update.message.reply_text(help_text)
+        try:
+            if isinstance(update, Update):
+                await message.reply_text(text, reply_markup=reply_markup)
+            else:
+                await message.edit_text(text, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Error in settings_command: {e}")
+            await message.reply_text("❌ Произошла ошибка. Попробуйте позже.")
     
     async def handle_toggle_notifications(self, query, user_id):
-        """Обработчик переключения уведомлений"""
+        """Переключает статус уведомлений"""
         settings = self.get_user_settings(user_id)
         settings['notifications'] = not settings['notifications']
-        
-        # Обновляем в БД
-        self.db.update_subscription(user_id, settings['notifications'])
+        self.user_settings[user_id] = settings
         
         status = "включены ✅" if settings['notifications'] else "отключены ❌"
         await query.answer(f"Уведомления {status}")
@@ -287,7 +336,7 @@ Confidence: LOW
 Рекомендуется: 70%
 """
         
-        await query.message.edit_text(text, reply_markup=reply_markup)
+        await self.send_with_retry(chat_id=query.message.chat_id, text=text, reply_markup=reply_markup)
         await query.answer()
     
     async def handle_threshold_change(self, query, user_id, value):
@@ -298,7 +347,7 @@ Confidence: LOW
         
         # Возвращаемся к настройкам
         await self.settings_command(query, None)
-    
+        
     async def handle_signal_types(self, query, user_id):
         """Обработчик выбора типов сигналов"""
         settings = self.get_user_settings(user_id)
@@ -333,7 +382,7 @@ Confidence: LOW
         
         await query.message.edit_text(text, reply_markup=reply_markup)
         await query.answer()
-    
+
     async def handle_toggle_signal_type(self, query, user_id, signal_type):
         """Переключает тип сигнала (PUMP/DUMP)"""
         settings = self.get_user_settings(user_id)
@@ -352,12 +401,9 @@ Confidence: LOW
         
         # Обновляем меню выбора типов
         await self.handle_signal_types(query, user_id)
-    
+
     async def handle_toggle_mode(self, query, user_id):
-        """
-        ✅ ИСПРАВЛЕНО: Переключает режим анализа: swing <-> day
-        Теперь обновляет глобальный режим через main_bot
-        """
+        """Переключает режим анализа между swing и day trading"""
         settings = self.get_user_settings(user_id)
         current_mode = settings.get('mode', 'swing')
         new_mode = 'day' if current_mode == 'swing' else 'swing'
@@ -365,7 +411,7 @@ Confidence: LOW
         # Обновляем локальную настройку пользователя
         self.update_user_setting(user_id, 'mode', new_mode)
         
-        # ✅ Обновляем глобальный режим бота (если есть ссылка)
+        # Обновляем глобальный режим бота (если есть ссылка)
         if self.main_bot:
             try:
                 success = self.main_bot.set_trading_mode(new_mode)
@@ -379,12 +425,226 @@ Confidence: LOW
                 logger.error(f"Error changing mode: {e}")
                 await query.answer("⚠️ Произошла ошибка")
         else:
-            # Если нет ссылки на main_bot - только локальное изменение
             await query.answer(f"Режим: {new_mode.upper()} (только отображение)")
             logger.warning("main_bot not set, mode change is local only")
         
         # Обновляем меню настроек
         await self.settings_command(query, None)
+        
+    def format_day_trading_message(self, signal_data, market_data):
+        """
+        Форматирует сообщение для дейтрейдинга с учетом специфики
+        
+        Args:
+            signal_data: dict с данными сигнала
+            market_data: dict с рыночными данными
+            
+        Returns:
+            str: Отформатированное сообщение
+        """
+        day_details = signal_data.get('day_trading_details', {})
+        
+        # Эмодзи для трендов и действий
+        trend_emoji = {
+            'up': '📈',
+            'down': '📉',
+            'sideways': '↔️'
+        }
+        
+        action_emoji = {
+            'EXECUTE': '🎯',
+            'PREPARE': '⚡',
+            'MONITOR': '👀',
+            'WAIT_VOLUME': '📊'
+        }
+        
+        # Определяем срочность сообщения
+        urgency = ''
+        if signal_data['action'] == 'EXECUTE' and signal_data['confidence'] == 'HIGH':
+            urgency = '🔥 СРОЧНО! 🔥\n'
+        
+        # Формируем основной текст
+        message = f"""{urgency}
+{action_emoji[signal_data['action']]} DAYTRADING СИГНАЛ: {signal_data['signal']}
+
+💰 Текущая цена: ${market_data['current_price']:,.2f}
+📊 Изменение (1m): {market_data['price_change_1m']:+.2f}%
+📈 Тренд: {trend_emoji[day_details['trend']]} {day_details['trend'].upper()}
+💪 Сила тренда: {day_details['trend_strength']:.1f}%
+
+📊 АНАЛИЗ:
+• Волатильность: {day_details['volume_surge']:.1f}x
+• Спред: {day_details['spread']:.3f}%
+• Консолидация: {'Да ✅' if day_details['is_consolidating'] else 'Нет ❌'}
+
+🎯 РЕКОМЕНДАЦИЯ:
+• Действие: {signal_data['action']}
+• Таймфрейм: {signal_data['timeframe']}
+• Вероятность: {signal_data['probability']:.1%}
+• Уверенность: {signal_data['confidence']}
+
+⚠️ РИСКИ:
+• Стоп-лосс: -{day_details['stop_loss_percent']:.1f}%
+• Take-profit: +{day_details['take_profit_percent']:.1f}%
+• Risk/Reward: {day_details['risk_reward_ratio']:.1f}
+
+⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+
+❗️ Daytrading требует быстрых решений.
+Всегда используйте стоп-лосс!
+"""
+        return message
+
+    def format_swing_message(self, signal_data, market_data):
+        """
+        Форматирует сообщение для свинг-трейдинга
+        
+        Args:
+            signal_data: dict с данными сигнала
+            market_data: dict с рыночными данными
+            
+        Returns:
+            str: Отформатированное сообщение
+        """
+        return f"""
+🔔 SWING TRADING СИГНАЛ: {signal_data['signal']}
+
+💰 Цена: ${market_data['current_price']:,.2f}
+📈 Изменение 1h: {market_data['price_change_1h']:+.2f}%
+📉 Изменение 4h: {market_data['price_change_4h']:+.2f}%
+
+📊 АНАЛИЗ:
+• Вероятность: {signal_data['probability']:.1%}
+• Уверенность: {signal_data['confidence']}
+• Объем: {market_data.get('volume_change', 0):+.1f}% от среднего
+
+⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+"""
+
+    async def send_signal_notification(self, user_id, signal_data, market_data):
+        """
+        Отправляет уведомление о сигнале с учетом режима торговли
+        
+        Args:
+            user_id: ID пользователя
+            signal_data: dict с данными сигнала
+            market_data: dict с рыночными данными
+        """
+        try:
+            # Проверяем настройки пользователя
+            settings = self.get_user_settings(user_id)
+            
+            if not settings.get('notifications', True):
+                return
+            
+            # Проверяем подходит ли сигнал под настройки пользователя
+            if signal_data['probability'] * 100 < settings['min_probability']:
+                return
+                
+            if signal_data['signal'] not in settings['signal_types']:
+                return
+            
+            # Форматируем сообщение в зависимости от режима
+            mode = settings.get('mode', 'swing')
+            if mode == 'day':
+                message = self.format_day_trading_message(signal_data, market_data)
+            else:
+                message = self.format_swing_message(signal_data, market_data)
+            
+            # Отправляем сообщение с механизмом повторных попыток
+            await self.send_with_retry(chat_id=user_id, text=message)
+            
+        except Exception as e:
+            logger.error(f"Error sending signal to user {user_id}: {e}")
+    
+    async def send_signal_to_users(self, prediction, market_data, indicators):
+        """
+        Отправляет сигнал всем подписанным пользователям с учётом их настроек
+        
+        Args:
+            prediction: результат ML прогноза
+            market_data: данные рынка
+            indicators: технические индикаторы
+        """
+        users = self.db.get_subscribed_users()
+        
+        if not users:
+            logger.info("No subscribed users to send signal")
+            return
+        
+        # Формируем сообщение
+        signal_emoji = "🚀" if prediction['signal'] == 'PUMP' else "📉"
+        confidence_emoji = "🔥" if prediction['confidence'] == 'HIGH' else "⚡" if prediction['confidence'] == 'MEDIUM' else "💡"
+        
+        message = f"""
+{signal_emoji} {prediction['signal']} SIGNAL {confidence_emoji}
+
+BTC/USDT
+💰 Цена: ${market_data['current_price']:,.2f}
+📊 Изменение 1h: {market_data['price_change_1h']:+.2f}%
+📈 Изменение 4h: {market_data['price_change_4h']:+.2f}%
+
+🎯 Вероятность: {prediction['probability']:.0%}
+🎚️ Confidence: {prediction['confidence']}
+
+🔍 Индикаторы:
+• RSI: {indicators['rsi']:.1f} {'📈' if indicators['rsi'] > 50 else '📉'}
+• MACD: {indicators['macd_crossover']}
+• Volume: {'+' if indicators['is_high_volume'] else ''}{(indicators['volume_ratio'] - 1) * 100:.0f}% от среднего
+• Fear & Greed: {market_data.get('fear_greed', 'N/A')}
+
+⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+
+⚠️ Это не финансовый совет!
+"""
+        
+        # Отправляем пользователям с учётом их настроек (троттлинг и батчинг)
+        sem = asyncio.Semaphore(config.TELEGRAM_QPS)  # ограничение сообщений/сек
+        tasks = []
+        sent_counter = {'count': 0}
+
+        async def _safe_send(uid, txt):
+            async with sem:
+                try:
+                    # Используем механизм повторных попыток
+                    await self.send_with_retry(chat_id=uid, text=txt)
+                    sent_counter['count'] += 1
+                except Exception as e:
+                    logger.error(f"Failed to send message to user {uid} after retries: {e}")
+
+        for user_id in users:
+            # Проверяем настройки пользователя
+            settings = self.get_user_settings(user_id)
+            if not settings.get('notifications', True):
+                continue
+            min_prob = settings.get('min_probability', 70)
+            if prediction['probability'] * 100 < min_prob:
+                continue
+            signal_types = settings.get('signal_types', ['PUMP', 'DUMP'])
+            if prediction['signal'] not in signal_types:
+                continue
+
+            tasks.append(_safe_send(user_id, message))
+
+        # Выполняем задачами батчами, сглаживая пики с повторными попытками
+        batch_size = config.TELEGRAM_BATCH_SIZE
+        for i in range(0, len(tasks), batch_size):
+            try:
+                await asyncio.gather(*tasks[i:i + batch_size])
+                if i + batch_size < len(tasks):
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in batch {i//batch_size}: {e}")
+        
+        logger.info(f"Signal sent to {sent_counter['count']}/{len(users)} users")
+        
+        # Сохраняем сигнал в БД
+        self.db.save_signal(
+            prediction['signal'],
+            prediction['probability'],
+            market_data['current_price'],
+            prediction['confidence']
+        )
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на inline кнопки"""
@@ -449,91 +709,6 @@ Confidence: LOW
             logger.error(f"Error in button_callback: {e}", exc_info=True)
             await query.answer("Произошла ошибка. Попробуйте снова.")
 
-    async def send_signal_to_users(self, prediction, market_data, indicators):
-        """
-        Отправляет сигнал всем подписанным пользователям с учётом их настроек
-        
-        Args:
-            prediction: результат ML прогноза
-            market_data: данные рынка
-            indicators: технические индикаторы
-        """
-        users = self.db.get_subscribed_users()
-        
-        if not users:
-            logger.info("No subscribed users to send signal")
-            return
-        
-        # Формируем сообщение
-        signal_emoji = "🚀" if prediction['signal'] == 'PUMP' else "📉"
-        confidence_emoji = "🔥" if prediction['confidence'] == 'HIGH' else "⚡" if prediction['confidence'] == 'MEDIUM' else "💡"
-        
-        message = f"""
-{signal_emoji} {prediction['signal']} SIGNAL {confidence_emoji}
-
-BTC/USDT
-💰 Цена: ${market_data['current_price']:,.2f}
-📊 Изменение 1h: {market_data['price_change_1h']:+.2f}%
-📈 Изменение 4h: {market_data['price_change_4h']:+.2f}%
-
-🎯 Вероятность: {prediction['probability']:.0%}
-🎚️ Confidence: {prediction['confidence']}
-
-🔍 Индикаторы:
-• RSI: {indicators['rsi']:.1f} {'📈' if indicators['rsi'] > 50 else '📉'}
-• MACD: {indicators['macd_crossover']}
-• Volume: {'+' if indicators['is_high_volume'] else ''}{(indicators['volume_ratio'] - 1) * 100:.0f}% от среднего
-• Fear & Greed: {market_data.get('fear_greed', 'N/A')}
-
-⏰ {datetime.now().strftime('%H:%M:%S UTC')}
-
-⚠️ Это не финансовый совет!
-"""
-        
-        # Отправляем пользователям с учётом их настроек (троттлинг и батчинг)
-        sem = asyncio.Semaphore(config.TELEGRAM_QPS)  # ограничение сообщений/сек
-        tasks = []
-        sent_counter = {'count': 0}
-
-        async def _safe_send(uid, txt):
-            async with sem:
-                try:
-                    await self.app.bot.send_message(chat_id=uid, text=txt)
-                    sent_counter['count'] += 1
-                except Exception as e:
-                    logger.error(f"Error sending to user {uid}: {e}")
-
-        for user_id in users:
-            # Проверяем настройки пользователя
-            settings = self.get_user_settings(user_id)
-            if not settings.get('notifications', True):
-                continue
-            min_prob = settings.get('min_probability', 70)
-            if prediction['probability'] * 100 < min_prob:
-                continue
-            signal_types = settings.get('signal_types', ['PUMP', 'DUMP'])
-            if prediction['signal'] not in signal_types:
-                continue
-
-            tasks.append(_safe_send(user_id, message))
-
-        # Выполняем задачами батчами, сглаживая пики
-        batch_size = config.TELEGRAM_BATCH_SIZE
-        for i in range(0, len(tasks), batch_size):
-            await asyncio.gather(*tasks[i:i + batch_size])
-            if i + batch_size < len(tasks):
-                await asyncio.sleep(1)
-
-        logger.info(f"Signal sent to {sent_counter['count']}/{len(users)} users")
-        
-        # Сохраняем сигнал в БД
-        self.db.save_signal(
-            prediction['signal'],
-            prediction['probability'],
-            market_data['current_price'],
-            prediction['confidence']
-        )
-    
     def setup_handlers(self):
         """Настройка обработчиков команд"""
         self.app.add_handler(CommandHandler('start', self.start_command))

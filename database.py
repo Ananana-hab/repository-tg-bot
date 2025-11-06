@@ -10,6 +10,24 @@ class Database:
     def __init__(self, db_path=config.DB_PATH):
         self.db_path = db_path
         self.init_db()
+        self.conn = None
+    
+    def __enter__(self):
+        """Контекстный менеджер для безопасной работы с БД"""
+        self.conn = self.get_connection()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Безопасное закрытие соединения"""
+        if self.conn:
+            try:
+                if exc_type is None:
+                    self.conn.commit()
+                else:
+                    self.conn.rollback()
+            finally:
+                self.conn.close()
+                self.conn = None
     
     def get_connection(self):
         """Создает подключение к базе данных"""
@@ -83,25 +101,22 @@ class Database:
     
     def save_price_data(self, price, volume, indicators):
         """Сохраняет данные о цене и индикаторах"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO price_data (price, volume, rsi, macd, macd_signal, bb_upper, bb_lower, fear_greed_index)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            price,
-            volume,
-            indicators.get('rsi'),
-            indicators.get('macd'),
-            indicators.get('macd_signal'),
-            indicators.get('bb_upper'),
-            indicators.get('bb_lower'),
-            indicators.get('fear_greed')
-        ))
-        
-        conn.commit()
-        conn.close()
+        with self as db:
+            cursor = db.conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO price_data (price, volume, rsi, macd, macd_signal, bb_upper, bb_lower, fear_greed_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                price,
+                volume,
+                indicators.get('rsi'),
+                indicators.get('macd'),
+                indicators.get('macd_signal'),
+                indicators.get('bb_upper'),
+                indicators.get('bb_lower'),
+                indicators.get('fear_greed')
+            ))
     
     def save_signal(self, signal_type, probability, price, confidence):
         """Сохраняет сгенерированный сигнал"""
@@ -210,3 +225,55 @@ class Database:
         
         conn.commit()
         conn.close()
+        
+    def save_signal(self, signal_type, probability, price, confidence):
+        """Сохраняет информацию о сигнале в БД"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO signals (signal_type, probability, price, confidence)
+                    VALUES (?, ?, ?, ?)
+                """, (signal_type, probability, price, confidence))
+                conn.commit()
+                logger.info(f"Signal saved: {signal_type} ({probability:.1%})")
+        except Exception as e:
+            logger.error(f"Error saving signal: {e}")
+
+    def get_signals_stats(self, days=30):
+        """Получает статистику сигналов за последние N дней"""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Получаем статистику по типам сигналов
+                cursor.execute("""
+                    SELECT 
+                        signal_type,
+                        COUNT(*) as total,
+                        AVG(probability) as avg_probability,
+                        AVG(CASE WHEN confidence = 'HIGH' THEN 1 ELSE 0 END) as high_confidence_ratio
+                    FROM signals 
+                    WHERE timestamp >= datetime('now', ?)
+                    GROUP BY signal_type
+                """, (f'-{days} days',))
+                
+                stats = {
+                    'PUMP': {'count': 0, 'avg_probability': 0, 'high_confidence': 0},
+                    'DUMP': {'count': 0, 'avg_probability': 0, 'high_confidence': 0}
+                }
+                
+                for row in cursor.fetchall():
+                    signal_type, count, avg_prob, high_conf = row
+                    if signal_type in stats:
+                        stats[signal_type].update({
+                            'count': count,
+                            'avg_probability': avg_prob,
+                            'high_confidence': high_conf * 100  # в процентах
+                        })
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Error getting signals stats: {e}")
+            return None

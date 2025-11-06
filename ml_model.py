@@ -21,13 +21,14 @@ class MLPredictor:
         # Попытка загрузить существующую модель
         self.load_model()
     
-    def prepare_features(self, indicators, market_data):
+    def prepare_features(self, indicators, market_data, mode='swing'):
         """
         Подготавливает features для ML модели
         
         Args:
             indicators: dict с техническими индикаторами
             market_data: dict с рыночными данными
+            mode: режим работы ('swing' или 'day')
             
         Returns:
             numpy array: вектор признаков
@@ -53,6 +54,23 @@ class MLPredictor:
             market_data['current_volume']
         ]
         
+        # Добавляем специфические features для дейтрейдинга
+        if mode == 'day' and 'day_trading' in indicators:
+            day_features = [
+                indicators['day_trading']['trend_strength'],
+                indicators['day_trading']['volatility_value'],
+                indicators['day_trading']['volume_surge'],
+                1 if indicators['day_trading']['is_consolidating'] else 0,
+                indicators['day_trading']['price_momentum'],
+                indicators['day_trading']['current_spread'],
+                1 if indicators['day_trading']['signals']['ma_cross'] == 'buy' else 
+                -1 if indicators['day_trading']['signals']['ma_cross'] == 'sell' else 0,
+                1 if indicators['day_trading']['signals']['volume_confirmed'] else 0,
+                1 if indicators['day_trading']['signals']['spread_ok'] else 0,
+                1 if indicators.get('is_valid_for_daytrading', False) else 0
+            ]
+            features.extend(day_features)
+        
         return np.array(features).reshape(1, -1)
     
     def create_default_model(self):
@@ -65,15 +83,22 @@ class MLPredictor:
         )
         logger.info("Created new Random Forest model")
     
-    def predict(self, indicators, market_data):
+    def predict(self, indicators, market_data, mode='swing'):
         """
         Делает прогноз: PUMP, DUMP или NEUTRAL
         
+        Args:
+            indicators: dict с техническими индикаторами
+            market_data: dict с рыночными данными
+            mode: режим работы ('swing' или 'day')
+            
         Returns:
             dict: {
                 'signal': 'PUMP'/'DUMP'/'NEUTRAL',
                 'probability': float (0-1),
-                'confidence': 'HIGH'/'MEDIUM'/'LOW'
+                'confidence': 'HIGH'/'MEDIUM'/'LOW',
+                'timeframe': str (только для day режима),
+                'action': str (только для day режима)
             }
         """
         # Если модель не обучена, используем rule-based подход
@@ -81,15 +106,23 @@ class MLPredictor:
             return self.rule_based_prediction(indicators, market_data)
         
         try:
-            # Подготовка features
-            features = self.prepare_features(indicators, market_data)
+            # Подготовка features с учетом режима
+            features = self.prepare_features(indicators, market_data, mode)
             
             # Нормализация
             features_scaled = self.scaler.transform(features)
             
-            # Прогноз
+            # Прогноз с учетом режима
             prediction = self.model.predict(features_scaled)[0]
             probabilities = self.model.predict_proba(features_scaled)[0]
+            
+            # Дополнительная валидация для дейтрейдинга
+            if mode == 'day':
+                prediction, probabilities = self.validate_day_trading_signal(
+                    prediction, 
+                    probabilities, 
+                    indicators
+                )
             
             # Определяем confidence level
             max_prob = max(probabilities)
@@ -108,7 +141,11 @@ class MLPredictor:
                 'confidence': confidence
             }
             
-            logger.info(f"ML Prediction: {result['signal']} ({result['probability']:.2%})")
+            # Добавляем специфическую информацию для дейтрейдинга
+            if mode == 'day' and 'day_trading' in indicators:
+                result.update(self.get_day_trading_details(indicators, result['signal']))
+            
+            logger.info(f"ML Prediction ({mode} mode): {result['signal']} ({result['probability']:.2%})")
             return result
             
         except Exception as e:
@@ -298,6 +335,88 @@ class MLPredictor:
         if prediction['signal'] == 'PUMP':
             return prediction['probability'] >= config.PUMP_THRESHOLD
         
+        if prediction['signal'] == 'DUMP':
+            return prediction['probability'] >= config.DUMP_THRESHOLD
+        
+        return False
+            
+    def validate_day_trading_signal(self, prediction, probabilities, indicators):
+        """
+        Валидирует и корректирует сигналы для дейтрейдинга
+        
+        Args:
+            prediction: текущий прогноз
+            probabilities: вероятности классов
+            indicators: все индикаторы
+            
+        Returns:
+            tuple: (скорректированный прогноз, скорректированные вероятности)
+        """
+        if not indicators.get('is_valid_for_daytrading', False):
+            # Если условия не подходят для дейтрейдинга, снижаем уверенность
+            probabilities = probabilities * 0.5
+            if max(probabilities) < 0.5:
+                prediction = 1  # NEUTRAL
+        
+        day_indicators = indicators.get('day_trading', {})
+        
+        # Проверяем спред
+        if not day_indicators.get('signals', {}).get('spread_ok', False):
+            probabilities = probabilities * 0.7
+        
+        # Проверяем объем
+        if not day_indicators.get('signals', {}).get('volume_confirmed', False):
+            probabilities = probabilities * 0.8
+        
+        # Проверяем волатильность
+        if not day_indicators.get('is_volatile', False):
+            probabilities = probabilities * 0.6
+        
+        return prediction, probabilities
+    
+    def get_day_trading_details(self, indicators, signal):
+        """
+        Формирует детальную информацию для сигналов дейтрейдинга
+        
+        Args:
+            indicators: все индикаторы
+            signal: тип сигнала
+            
+        Returns:
+            dict: Дополнительная информация для дейтрейдинга
+        """
+        day_indicators = indicators.get('day_trading', {})
+        
+        # Определяем таймфрейм для торговли
+        if day_indicators.get('is_consolidating', False):
+            timeframe = '1m'  # Короткий таймфрейм для консолидации
+        else:
+            timeframe = '5m'  # Более длинный для тренда
+        
+        # Определяем рекомендуемое действие
+        action = 'MONITOR'  # По умолчанию просто наблюдаем
+        
+        if signal != 'NEUTRAL':
+            if day_indicators.get('signals', {}).get('volume_confirmed', False):
+                if day_indicators.get('signals', {}).get('spread_ok', False):
+                    action = 'EXECUTE'  # Можно входить в позицию
+                else:
+                    action = 'PREPARE'  # Готовимся, но ждем улучшения спреда
+            else:
+                action = 'WAIT_VOLUME'  # Ждем подтверждения объемом
+        
+        return {
+            'timeframe': timeframe,
+            'action': action,
+            'day_trading_details': {
+                'trend': day_indicators.get('trend'),
+                'trend_strength': day_indicators.get('trend_strength'),
+                'volume_surge': day_indicators.get('volume_surge'),
+                'spread': day_indicators.get('current_spread'),
+                'is_consolidating': day_indicators.get('is_consolidating', False),
+                'conditions_met': indicators.get('is_valid_for_daytrading', False)
+            }
+        }
         if prediction['signal'] == 'DUMP':
             return prediction['probability'] >= config.DUMP_THRESHOLD
         

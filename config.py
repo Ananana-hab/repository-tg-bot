@@ -55,6 +55,44 @@ MODE_CONFIGS = {
     }
 }
 
+# Day Trading специфические параметры
+DAY_TRADING_CONFIG = {
+    'volatility_threshold': 0.5,  # Минимальный % волатильности для активации сканирования
+    'volume_increase_threshold': 2.0,  # Минимальное увеличение объема (множитель от среднего)
+    'max_spread': 0.15,  # Максимально допустимый спред в %
+    'min_24h_volume': 1000000,  # Минимальный 24ч объем в USDT
+    
+    # Параметры технического анализа
+    'fast_ma': 5,  # Быстрая скользящая средняя для дейтрейдинга
+    'slow_ma': 20,  # Медленная скользящая средняя
+    'rsi_overbought': 75,  # Уровень перекупленности для RSI
+    'rsi_oversold': 25,    # Уровень перепроданности для RSI
+    
+    # Тайминги
+    'consolidation_period': 5,  # Период консолидации в минутах
+    'trend_confirmation_candles': 3,  # Количество свечей для подтверждения тренда
+    
+    # Уведомления
+    'notification_cooldown': 60,  # Минимальный интервал между уведомлениями (секунды)
+    'price_update_interval': 30,  # Интервал обновления цены (секунды)
+}
+
+# Расширяем существующий MODE_CONFIGS для day trading
+MODE_CONFIGS['day'].update({
+    'volatility_settings': DAY_TRADING_CONFIG,
+    'max_trades_per_day': 5,  # Максимальное количество сделок в день
+    'session_profit_target': 2.0,  # Целевой % прибыли за сессию
+    'session_stop_loss': -1.0,  # Стоп-лосс % для всей сессии
+})
+
+# Общие параметры безопасности
+SAFETY_SETTINGS = {
+    'max_daily_notifications': 20,  # Максимальное количество уведомлений в день
+    'market_correlation_threshold': 0.7,  # Минимальная корреляция с рынком
+    'volume_validation': True,  # Включить проверку объема
+    'spread_validation': True,  # Включить проверку спреда
+}
+
 # База данных
 DB_PATH = 'btc_signals.db'
 

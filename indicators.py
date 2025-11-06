@@ -199,13 +199,14 @@ class TechnicalIndicators:
         return atr
     
     @staticmethod
-    def calculate_all_indicators(df, orderbook=None):
+    def calculate_all_indicators(df, orderbook=None, mode='swing'):
         """
         Рассчитывает все индикаторы и возвращает единый словарь
         
         Args:
             df: DataFrame с OHLCV данными
             orderbook: dict стакан ордеров (опционально)
+            mode: str режим работы ('swing' или 'day')
             
         Returns:
             dict: Все рассчитанные индикаторы
@@ -268,13 +269,136 @@ class TechnicalIndicators:
                 'orderbook_imbalance': ob_imbalance
             }
             
-            logger.info(f"Indicators calculated: RSI={rsi:.2f}, MACD crossover={macd_data['crossover']}, VWAP={'OK' if vwap else 'None'}")
+            # Добавляем индикаторы дейтрейдинга если нужно
+            if mode == 'day':
+                day_indicators = TechnicalIndicators.calculate_day_trading_indicators(df, orderbook)
+                if day_indicators:
+                    indicators.update({
+                        'day_trading': day_indicators,
+                        'is_valid_for_daytrading': TechnicalIndicators.validate_day_trading_conditions(indicators, day_indicators)[0]
+                    })
+            
+            logger.info(f"Indicators calculated for {mode} mode: RSI={rsi:.2f}, MACD crossover={macd_data['crossover']}, VWAP={'OK' if vwap else 'None'}")
             return indicators
             
         except Exception as e:
             logger.error(f"Error calculating indicators: {e}", exc_info=True)
             return None
     
+    @staticmethod
+    def calculate_day_trading_indicators(df, orderbook=None):
+        """
+        Специализированные индикаторы для дейтрейдинга
+        
+        Args:
+            df: DataFrame с OHLCV данными минутного таймфрейма
+            orderbook: Актуальный стакан заявок
+            
+        Returns:
+            dict: Индикаторы для дейтрейдинга
+        """
+        try:
+            day_config = config.DAY_TRADING_CONFIG
+            
+            # Быстрые и медленные MA
+            fast_ma = df['close'].ewm(span=day_config['fast_ma']).mean()
+            slow_ma = df['close'].ewm(span=day_config['slow_ma']).mean()
+            
+            # Определение тренда
+            trend = 'up' if fast_ma.iloc[-1] > slow_ma.iloc[-1] else 'down'
+            trend_strength = abs(fast_ma.iloc[-1] - slow_ma.iloc[-1]) / slow_ma.iloc[-1] * 100
+            
+            # Волатильность
+            recent_volatility = df['high'].rolling(5).max() / df['low'].rolling(5).min() - 1
+            is_volatile = recent_volatility.iloc[-1] > day_config['volatility_threshold']
+            
+            # Объемный анализ
+            volume_ma = df['volume'].rolling(20).mean()
+            volume_surge = df['volume'].iloc[-1] / volume_ma.iloc[-1]
+            
+            # Анализ консолидации
+            consolidation_period = day_config['consolidation_period']
+            price_range = (df['high'].rolling(consolidation_period).max() - 
+                         df['low'].rolling(consolidation_period).min()) / df['close'].rolling(consolidation_period).mean()
+            is_consolidating = price_range.iloc[-1] < day_config['volatility_threshold']
+            
+            # Импульс цены
+            price_momentum = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
+            
+            # Спред
+            if orderbook:
+                best_bid = float(orderbook['bids'][0][0])
+                best_ask = float(orderbook['asks'][0][0])
+                current_spread = (best_ask - best_bid) / best_bid * 100
+            else:
+                current_spread = 0
+                
+            return {
+                'trend': trend,
+                'trend_strength': trend_strength,
+                'is_volatile': is_volatile,
+                'volatility_value': recent_volatility.iloc[-1],
+                'volume_surge': volume_surge,
+                'is_consolidating': is_consolidating,
+                'price_momentum': price_momentum,
+                'current_spread': current_spread,
+                'ma_fast': fast_ma.iloc[-1],
+                'ma_slow': slow_ma.iloc[-1],
+                'signals': {
+                    'ma_cross': 'buy' if (fast_ma.iloc[-1] > slow_ma.iloc[-1] and 
+                                        fast_ma.iloc[-2] <= slow_ma.iloc[-2]) else
+                              'sell' if (fast_ma.iloc[-1] < slow_ma.iloc[-1] and 
+                                       fast_ma.iloc[-2] >= slow_ma.iloc[-2]) else None,
+                    'volume_confirmed': volume_surge > day_config['volume_increase_threshold'],
+                    'spread_ok': current_spread < day_config['max_spread']
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating day trading indicators: {e}")
+            return None
+            
+    @staticmethod
+    def validate_day_trading_conditions(indicators, day_indicators):
+        """
+        Проверяет условия для дейтрейдинга
+        
+        Args:
+            indicators: общие индикаторы
+            day_indicators: специализированные индикаторы дейтрейдинга
+            
+        Returns:
+            tuple: (bool, str) - (подходит ли для дейтрейдинга, причина)
+        """
+        if not day_indicators:
+            return False, "Не удалось рассчитать индикаторы"
+            
+        day_config = config.DAY_TRADING_CONFIG
+        
+        # Проверка волатильности
+        if not day_indicators['is_volatile']:
+            return False, "Недостаточная волатильность"
+            
+        # Проверка объема
+        if not day_indicators['signals']['volume_confirmed']:
+            return False, "Недостаточный объем"
+            
+        # Проверка спреда
+        if not day_indicators['signals']['spread_ok']:
+            return False, "Слишком большой спред"
+            
+        # Проверка тренда
+        if day_indicators['trend_strength'] < day_config['volatility_threshold']:
+            return False, "Слабый тренд"
+            
+        # Проверка RSI
+        if indicators['rsi'] > day_config['rsi_overbought']:
+            return False, "Перекупленность по RSI"
+        elif indicators['rsi'] < day_config['rsi_oversold']:
+            return False, "Перепроданность по RSI"
+            
+        return True, "Условия подходят для дейтрейдинга"
+
     @staticmethod
     def get_signal_strength(indicators, price_change):
         """
