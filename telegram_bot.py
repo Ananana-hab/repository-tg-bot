@@ -14,7 +14,7 @@ class TelegramBot:
         self.token = token
         self.db = Database()
         self.app = None
-        self.main_bot = main_bot  # ✅ Ссылка на главный бот
+        self.main_bot = main_bot  # Ссылка на главный бот
         
         # Хранилище пользовательских настроек (временно в памяти)
         self.user_settings = {}
@@ -35,6 +35,32 @@ class TelegramBot:
         settings = self.get_user_settings(user_id)
         settings[key] = value
         self.user_settings[user_id] = settings
+    
+    def _get_bb_status(self, indicators):
+        """Определяет статус Bollinger Bands"""
+        try:
+            bb_upper = indicators.get('bollinger_upper')
+            bb_lower = indicators.get('bollinger_lower')
+            bb_middle = indicators.get('bollinger_middle')
+            
+            if bb_upper and bb_lower and bb_middle:
+                return "Внутри диапазона"
+            return "N/A"
+        except:
+            return "N/A"
+    
+    def _get_volume_status(self, indicators):
+        """Определяет статус объёма"""
+        try:
+            volume_ratio = indicators.get('volume_ratio', 1.0)
+            if volume_ratio > 1.5:
+                return f"+{(volume_ratio-1)*100:.0f}% выше среднего"
+            elif volume_ratio < 0.7:
+                return f"{(1-volume_ratio)*100:.0f}% ниже среднего"
+            else:
+                return "Средний"
+        except:
+            return "N/A"
 
     async def send_with_retry(self, chat_id, text, reply_markup=None, max_retries=3):
         """
@@ -118,26 +144,51 @@ class TelegramBot:
         
         await self.send_with_retry(chat_id=message.chat_id, text="🔄 Анализирую рынок, подождите...")
         
-        # TODO: Здесь будет вызов реального анализа из main.py
-        status_text = f"""
-📊 BTC/USDT Анализ
+        try:
+            # Получаем реальный анализ рынка
+            if self.main_bot:
+                # Определяем текущий режим
+                async with self.main_bot._mode_lock:
+                    mode = self.main_bot.current_mode
+                
+                # Выполняем анализ
+                analysis = await self.main_bot.analyze_market_with_mode(mode)
+                
+                if analysis:
+                    market_data = analysis['market_data']
+                    indicators = analysis['indicators']
+                    prediction = analysis['prediction']
+                    
+                    # Форматируем сообщение с реальными данными
+                    status_text = f"""
+📊 BTC/USDT Анализ ({mode.upper()} режим)
 
-💰 Цена: $107,450
-📈 Изменение 1h: +0.5%
-📊 Изменение 4h: +1.2%
+💰 Цена: ${market_data['current_price']:,.2f}
+📈 Изменение 1h: {market_data.get('price_change_1h', 0):.2f}%
+📊 Изменение 4h: {market_data.get('price_change_4h', 0):.2f}%
+📉 24h изменение: {market_data.get('stats_24h', {}).get('priceChangePercent', 0):.2f}%
 
 🔍 Индикаторы:
-• RSI (14): 68 📈
-• MACD: Бычий тренд
-• Bollinger: Внутри диапазона
-• Объём: +25% выше среднего
+• RSI (14): {indicators['rsi']:.1f} {'📈' if indicators['rsi'] > 50 else '📉'}
+• MACD: {'Бычий' if indicators.get('macd_crossover') == 'bullish' else 'Медвежий' if indicators.get('macd_crossover') == 'bearish' else 'Нейтральный'}
+• Bollinger: {self._get_bb_status(indicators)}
+• Объём: {self._get_volume_status(indicators)}
+• Fear & Greed: {indicators.get('fear_greed', 50)}
 
-🎯 Прогноз: NEUTRAL
-Вероятность: 55%
-Confidence: LOW
+🎯 Прогноз: {prediction['signal']}
+Вероятность: {prediction['probability']*100:.1f}%
+Confidence: {prediction['confidence']}
 
 ⏰ {datetime.now().strftime('%H:%M:%S UTC')}
-        """
+                    """
+                else:
+                    status_text = "⚠️ Не удалось получить данные анализа. Попробуйте позже."
+            else:
+                status_text = "⚠️ Анализатор недоступен. Попробуйте позже."
+                
+        except Exception as e:
+            logger.error(f"Error in status_command: {e}", exc_info=True)
+            status_text = "❌ Ошибка при анализе рынка. Попробуйте позже."
         
         await self.send_with_retry(chat_id=message.chat_id, text=status_text)
     
