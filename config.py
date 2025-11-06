@@ -111,3 +111,15 @@ TELEGRAM_BATCH_SIZE = 10  # размер батча для отправки со
 # Логирование
 LOG_LEVEL = 'INFO'
 LOG_FILE = 'bot.log'
+
+# ✅ НОВОЕ: Production settings
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')  # production или development
+HEALTHCHECK_PORT = int(os.getenv('HEALTHCHECK_PORT', '8080'))
+ALERT_TELEGRAM_CHAT_ID = os.getenv('ALERT_TELEGRAM_CHAT_ID', None)  # Chat ID для критичных алертов
+
+# Retry настройки для внешних API
+API_MAX_RETRIES = 3
+API_RETRY_DELAY = 2  # секунды
+
+# Graceful shutdown timeout
+SHUTDOWN_TIMEOUT = 30  # секунды

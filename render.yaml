@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: btc-pump-dump-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TRADING_MODE
+        value: swing
+      - key: ENVIRONMENT
+        value: production
+      - key: HEALTHCHECK_PORT
+        value: 8080
+      - key: ALERT_TELEGRAM_CHAT_ID
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true

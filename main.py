@@ -1,25 +1,42 @@
 import asyncio
 import config
 import logging
+from logging.handlers import RotatingFileHandler
 from data_collector import DataCollector
 from indicators import TechnicalIndicators
 from ml_model import MLPredictor
 from telegram_bot import TelegramBot
 from database import Database
+from healthcheck import HealthCheck
 from utils import validate_config
 import time
 from datetime import datetime
 import random
+import signal
+import sys
 
-# Настройка логирования
+# Настройка логирования для production
+file_handler = RotatingFileHandler(
+    config.LOG_FILE,
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
+)
+console_handler = logging.StreamHandler()
+
+log_format = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+file_handler.setFormatter(log_format)
+console_handler.setFormatter(log_format)
+
 logging.basicConfig(
     level=config.LOG_LEVEL,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(config.LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, console_handler]
 )
+
 logger = logging.getLogger(__name__)
 
 class BTCPumpDumpBot:
@@ -30,13 +47,16 @@ class BTCPumpDumpBot:
         self.ml_predictor = MLPredictor()
         self.telegram_bot = TelegramBot(config.TELEGRAM_BOT_TOKEN, main_bot=self)
         self.db = Database()
-        
+        self.healthcheck = HealthCheck(port=config.HEALTHCHECK_PORT)
         
         self.last_signal = None
         self.last_signal_time = None
         # Режим анализа: 'swing' | 'day' (читаем из config)
         self.current_mode = config.TRADING_MODE
         self._mode_lock = asyncio.Lock()
+        
+        # Флаг для graceful shutdown
+        self.shutdown_requested = False
         
         logger.info("BTCPumpDumpBot initialized")
 
@@ -113,9 +133,13 @@ class BTCPumpDumpBot:
             logger.info(f"Current price: ${market_data['current_price']:,.2f}")
             logger.info(f"RSI: {indicators['rsi']:.2f}, MACD crossover: {indicators['macd_crossover']}")
             
+            # Обновляем healthcheck метрики
+            self.healthcheck.update_analysis_time()
+            
             return result
         except Exception as e:
             logger.error(f"Error in market analysis (mode={mode}): {e}", exc_info=True)
+            self.healthcheck.increment_errors()
             return None
 
     async def analyze_market(self):
@@ -226,6 +250,10 @@ class BTCPumpDumpBot:
             analysis_result['indicators']
         )
         
+        # Обновляем healthcheck метрики
+        users_count = len(self.db.get_subscribed_users())
+        self.healthcheck.increment_signals(users_count)
+        
         # Обновляем последний сигнал
         self.last_signal = prediction['signal']
         self.last_signal_time = current_time
@@ -237,7 +265,7 @@ class BTCPumpDumpBot:
         """
         logger.info("Starting monitoring loop...")
         
-        while True:
+        while not self.shutdown_requested:
             try:
                 # Определяем режим под lock и анализируем рынок
                 async with self._mode_lock:
@@ -252,13 +280,20 @@ class BTCPumpDumpBot:
                 jitter = random.randint(-3, 3)
                 sleep_s = max(5, base_interval + jitter)
                 logger.info(f"Waiting {sleep_s} seconds until next check (mode={mode})...")
-                await asyncio.sleep(sleep_s)
+                
+                # Прерываемый sleep для быстрого shutdown
+                for _ in range(sleep_s):
+                    if self.shutdown_requested:
+                        break
+                    await asyncio.sleep(1)
                 
             except KeyboardInterrupt:
                 logger.info("Monitoring loop stopped by user")
+                self.shutdown_requested = True
                 break
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}", exc_info=True)
+                self.healthcheck.increment_errors()
                 # Ждём перед повтором в случае ошибки
                 await asyncio.sleep(60)
     
@@ -289,32 +324,64 @@ class BTCPumpDumpBot:
         """
         Запускает бота полностью
         Одновременно работают:
-        1. Telegram bot (обрабатывает команды пользователей)
-        2. Monitoring loop (анализирует рынок и шлёт сигналы)
+        1. Healthcheck HTTP server (мониторинг работоспособности)
+        2. Telegram bot (обрабатывает команды пользователей)
+        3. Monitoring loop (анализирует рынок и шлёт сигналы)
         """
         logger.info("=" * 50)
         logger.info("Starting BTC Pump/Dump Bot")
+        logger.info(f"Environment: {config.ENVIRONMENT}")
         logger.info(f"Symbol: {config.SYMBOL}")
         logger.info(f"Timeframe: {config.TIMEFRAME}")
         logger.info(f"Check interval: {config.CHECK_INTERVAL}s")
+        logger.info(f"Trading mode: {config.TRADING_MODE}")
         logger.info("=" * 50)
         
         try:
-            # Создаём задачи для параллельного выполнения
+            # 1. Запускаем healthcheck сервер
+            await self.healthcheck.start()
+            
+            # 2. Создаём задачи для параллельного выполнения
             bot_task = asyncio.create_task(self.start_telegram_bot())
             monitor_task = asyncio.create_task(self.monitoring_loop())
             
-            # Ждём выполнения обеих задач
+            # 3. Устанавливаем статус готовности
+            self.healthcheck.set_ready(True)
+            logger.info("✅ Bot is ready and running!")
+            
+            # 4. Ждём выполнения задач
             await asyncio.gather(bot_task, monitor_task)
             
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
+            self.shutdown_requested = True
         except Exception as e:
             logger.error(f"Fatal error: {e}", exc_info=True)
+            self.healthcheck.increment_errors()
         finally:
             logger.info("Shutting down bot...")
-            if self.telegram_bot.app:
-                await self.telegram_bot.app.stop()
+            self.healthcheck.set_ready(False)
+            
+            # Graceful shutdown с таймаутом
+            try:
+                # Останавливаем Telegram бота
+                if self.telegram_bot.app:
+                    logger.info("Stopping Telegram bot...")
+                    await asyncio.wait_for(
+                        self.telegram_bot.app.stop(),
+                        timeout=config.SHUTDOWN_TIMEOUT
+                    )
+                
+                # Останавливаем healthcheck сервер
+                logger.info("Stopping healthcheck server...")
+                await self.healthcheck.stop()
+                
+                logger.info("✅ Bot stopped gracefully")
+                
+            except asyncio.TimeoutError:
+                logger.warning("Shutdown timeout exceeded, forcing stop...")
+            except Exception as e:
+                logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 def main():
     """Точка входа в программу"""
@@ -338,13 +405,26 @@ def main():
         print("=" * 50)
         return
     
-    # Создаём и запускаем бота
+    # Создаём бота
     bot = BTCPumpDumpBot()
+    
+    # Настройка обработчиков сигналов для graceful shutdown
+    def signal_handler(signum, frame):
+        """Обработчик SIGTERM и SIGINT для graceful shutdown"""
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        bot.shutdown_requested = True
+    
+    # Регистрируем обработчики (SIGTERM для systemd, SIGINT для Ctrl+C)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
     
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         print("\n👋 Bot stopped. Goodbye!")
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
