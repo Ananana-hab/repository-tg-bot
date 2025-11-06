@@ -1,0 +1,14 @@
+Исправления для telegram_bot.py (строки 471, 487-489):
+
+СТРОКА 471:
+Заменить: market_data['price_change_1m']
+На: market_data['price_change_1h']
+
+СТРОКИ 487-489 (блок РИСКИ):
+УДАЛИТЬ весь блок:
+⚠️ РИСКИ:
+• Стоп-лосс: -{day_details['stop_loss_percent']:.1f}%
+• Take-profit: +{day_details['take_profit_percent']:.1f}%
+• Risk/Reward: {day_details['risk_reward_ratio']:.1f}
+
+Эти поля не существуют в day_trading_details.

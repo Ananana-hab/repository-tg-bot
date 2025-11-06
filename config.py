@@ -37,6 +37,11 @@ MIN_PRICE_CHANGE_DUMP = -3.0  # 3% падение
 # Интервал проверки (в секундах)
 CHECK_INTERVAL = 300  # 5 минут
 
+# ✅ Day Trading константы (для совместимости с main.py)
+DAY_TIMEFRAME = '1m'
+DAY_LIMIT = 100
+DAY_CHECK_INTERVAL = 60
+
 # ✅ НОВОЕ: Параметры для разных режимов торговли
 MODE_CONFIGS = {
     'swing': {

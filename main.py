@@ -6,6 +6,7 @@ from indicators import TechnicalIndicators
 from ml_model import MLPredictor
 from telegram_bot import TelegramBot
 from database import Database
+from utils import validate_config
 import time
 from datetime import datetime
 import random
@@ -33,8 +34,8 @@ class BTCPumpDumpBot:
         
         self.last_signal = None
         self.last_signal_time = None
-        # Режим анализа: 'swing' | 'day'
-        self.current_mode = 'swing'
+        # Режим анализа: 'swing' | 'day' (читаем из config)
+        self.current_mode = config.TRADING_MODE
         self._mode_lock = asyncio.Lock()
         
         logger.info("BTCPumpDumpBot initialized")
@@ -73,7 +74,8 @@ class BTCPumpDumpBot:
             # 2. Рассчитываем индикаторы
             indicators = TechnicalIndicators.calculate_all_indicators(
                 market_data['df'],
-                orderbook=market_data.get('orderbook')
+                orderbook=market_data.get('orderbook'),
+                mode=mode
             )
             if not indicators:
                 logger.error("Failed to calculate indicators")
@@ -83,7 +85,7 @@ class BTCPumpDumpBot:
             indicators['fear_greed'] = market_data['fear_greed']
             
             # 3. Делаем прогноз
-            prediction = self.ml_predictor.predict(indicators, market_data)
+            prediction = self.ml_predictor.predict(indicators, market_data, mode=mode)
             
             # 4. Определяем силу сигнала
             signal_strength = TechnicalIndicators.get_signal_strength(
@@ -136,7 +138,8 @@ class BTCPumpDumpBot:
             # 2. Рассчитываем индикаторы
             indicators = TechnicalIndicators.calculate_all_indicators(
                 market_data['df'],
-                orderbook=market_data.get('orderbook')
+                orderbook=market_data.get('orderbook'),
+                mode='swing'
             )
             if not indicators:
                 logger.error("Failed to calculate indicators")
@@ -146,7 +149,7 @@ class BTCPumpDumpBot:
             indicators['fear_greed'] = market_data['fear_greed']
             
             # 3. Делаем прогноз
-            prediction = self.ml_predictor.predict(indicators, market_data)
+            prediction = self.ml_predictor.predict(indicators, market_data, mode='swing')
             
             # 4. Определяем силу сигнала
             signal_strength = TechnicalIndicators.get_signal_strength(
@@ -315,6 +318,11 @@ class BTCPumpDumpBot:
 
 def main():
     """Точка входа в программу"""
+    
+    # Валидация конфигурации
+    if not validate_config():
+        print("❌ Ошибки конфигурации. Исправьте и запустите снова.")
+        return
     
     # Проверяем наличие токена
     if config.TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':

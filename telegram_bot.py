@@ -49,13 +49,23 @@ class TelegramBot:
         last_error = None
         for attempt in range(max_retries):
             try:
-                async with Application.builder().token(self.token).build() as app:
-                    return await app.bot.send_message(
+                # Используем существующий Application вместо создания нового
+                if self.app and self.app.bot:
+                    return await self.app.bot.send_message(
                         chat_id=chat_id,
                         text=text,
                         reply_markup=reply_markup,
                         parse_mode='HTML'
                     )
+                else:
+                    # Fallback: создаём временный Application если основной не инициализирован
+                    async with Application.builder().token(self.token).build() as app:
+                        return await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
@@ -468,7 +478,7 @@ Confidence: LOW
 {action_emoji[signal_data['action']]} DAYTRADING СИГНАЛ: {signal_data['signal']}
 
 💰 Текущая цена: ${market_data['current_price']:,.2f}
-📊 Изменение (1m): {market_data['price_change_1m']:+.2f}%
+📊 Изменение (1h): {market_data['price_change_1h']:+.2f}%
 📈 Тренд: {trend_emoji[day_details['trend']]} {day_details['trend'].upper()}
 💪 Сила тренда: {day_details['trend_strength']:.1f}%
 
@@ -482,11 +492,6 @@ Confidence: LOW
 • Таймфрейм: {signal_data['timeframe']}
 • Вероятность: {signal_data['probability']:.1%}
 • Уверенность: {signal_data['confidence']}
-
-⚠️ РИСКИ:
-• Стоп-лосс: -{day_details['stop_loss_percent']:.1f}%
-• Take-profit: +{day_details['take_profit_percent']:.1f}%
-• Risk/Reward: {day_details['risk_reward_ratio']:.1f}
 
 ⏰ {datetime.now().strftime('%H:%M:%S UTC')}
 
@@ -637,14 +642,6 @@ BTC/USDT
                 logger.error(f"Error in batch {i//batch_size}: {e}")
         
         logger.info(f"Signal sent to {sent_counter['count']}/{len(users)} users")
-        
-        # Сохраняем сигнал в БД
-        self.db.save_signal(
-            prediction['signal'],
-            prediction['probability'],
-            market_data['current_price'],
-            prediction['confidence']
-        )
     
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на inline кнопки"""

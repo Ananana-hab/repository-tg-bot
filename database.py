@@ -118,23 +118,6 @@ class Database:
                 indicators.get('fear_greed')
             ))
     
-    def save_signal(self, signal_type, probability, price, confidence):
-        """Сохраняет сгенерированный сигнал"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO signals (signal_type, probability, price, confidence)
-            VALUES (?, ?, ?, ?)
-        ''', (signal_type, probability, price, confidence))
-        
-        signal_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Signal saved: {signal_type} with probability {probability:.2%}")
-        return signal_id
-    
     def update_signal_result(self, signal_id, actual_result, result_price):
         """Обновляет результат сигнала после проверки"""
         conn = self.get_connection()
