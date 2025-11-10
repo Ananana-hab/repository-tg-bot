@@ -16,6 +16,8 @@ class DataCollector:
         })
         # Кэш для FNG
         self._fng_cache = {'value': None, 'ts': None}
+        # Кэш для Open Interest (обновляется каждые 5 минут)
+        self._oi_cache = {'value': None, 'ts': None, 'history': []}
         
     def get_current_price(self):
         """Получает текущую цену BTC/USDT"""
@@ -143,6 +145,116 @@ class DataCollector:
             logger.error(f"Error fetching 24h stats: {e}")
             return None
     
+    def get_open_interest(self):
+        """
+        Получает текущий Open Interest для BTC/USDT фьючерсов
+        с кэшированием и историей изменений
+        
+        Returns:
+            dict: {
+                'value': текущее значение OI,
+                'change_5m': изменение за 5 минут (%),
+                'change_1h': изменение за 1 час (%),
+                'change_4h': изменение за 4 часа (%)
+            }
+        """
+        try:
+            now = datetime.now()
+            
+            # Запрашиваем текущий OI (всегда свежий)
+            url = 'https://fapi.binance.com/fapi/v1/openInterest'
+            params = {'symbol': 'BTCUSDT'}
+            response = requests.get(url, params=params, timeout=5)
+            
+            if response.status_code != 200:
+                logger.error(f"OI API error: {response.status_code}")
+                return self._get_cached_oi_or_default()
+            
+            data = response.json()
+            current_oi = float(data['openInterest'])
+            
+            # Обновляем историю (храним последние 60 записей = ~5 часов при проверке каждые 5 мин)
+            self._oi_cache['history'].append({
+                'value': current_oi,
+                'timestamp': now
+            })
+            
+            # Обрезаем историю до 60 записей
+            if len(self._oi_cache['history']) > 60:
+                self._oi_cache['history'] = self._oi_cache['history'][-60:]
+            
+            # Вычисляем изменения
+            change_5m = self._calculate_oi_change(minutes=5)
+            change_1h = self._calculate_oi_change(minutes=60)
+            change_4h = self._calculate_oi_change(minutes=240)
+            
+            result = {
+                'value': current_oi,
+                'change_5m': change_5m,
+                'change_1h': change_1h,
+                'change_4h': change_4h,
+                'timestamp': now
+            }
+            
+            # Обновляем кэш
+            self._oi_cache['value'] = result
+            self._oi_cache['ts'] = now
+            
+            logger.info(
+                f"Open Interest: {current_oi:,.0f} | "
+                f"5m: {change_5m:+.2f}% | 1h: {change_1h:+.2f}% | 4h: {change_4h:+.2f}%"
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error fetching Open Interest: {e}")
+            return self._get_cached_oi_or_default()
+    
+    def _calculate_oi_change(self, minutes):
+        """Вычисляет изменение OI за указанный период"""
+        try:
+            history = self._oi_cache['history']
+            if len(history) < 2:
+                return 0.0
+            
+            now = datetime.now()
+            target_time = now - timedelta(minutes=minutes)
+            
+            # Находим ближайшую запись к целевому времени
+            closest = min(
+                history,
+                key=lambda x: abs((x['timestamp'] - target_time).total_seconds())
+            )
+            
+            current_oi = history[-1]['value']
+            past_oi = closest['value']
+            
+            if past_oi == 0:
+                return 0.0
+            
+            change = ((current_oi - past_oi) / past_oi) * 100
+            return round(change, 2)
+            
+        except Exception as e:
+            logger.debug(f"Error calculating OI change: {e}")
+            return 0.0
+    
+    def _get_cached_oi_or_default(self):
+        """Возвращает кэшированный OI или дефолтные значения"""
+        if self._oi_cache['value']:
+            logger.warning("Using cached OI value")
+            return self._oi_cache['value']
+        else:
+            logger.warning("No OI cache available, returning defaults")
+            return {
+                'value': 0,
+                'change_5m': 0.0,
+                'change_1h': 0.0,
+                'change_4h': 0.0,
+                'timestamp': datetime.now()
+            }
+    
     def calculate_price_change(self, df, periods=12):
         """
         Рассчитывает изменение цены за N периодов
@@ -229,6 +341,9 @@ class DataCollector:
         # Orderbook
         orderbook = self.get_orderbook()
         
+        # ✅ Open Interest (НОВОЕ!)
+        open_interest = self.get_open_interest()
+        
         # ✅ Изменение цены с правильными периодами
         price_change_1h = self.calculate_price_change(df, periods=periods_1h)
         price_change_4h = self.calculate_price_change(df, periods=periods_4h)
@@ -243,6 +358,11 @@ class DataCollector:
             'price_change_4h': price_change_4h,
             'stats_24h': stats_24h,
             'orderbook': orderbook,
+            # ✅ НОВОЕ: Open Interest
+            'open_interest': open_interest['value'],
+            'oi_change_5m': open_interest['change_5m'],
+            'oi_change_1h': open_interest['change_1h'],
+            'oi_change_4h': open_interest['change_4h'],
             # ✅ Метаданные для отладки
             'timeframe': tf,
             'timeframe_minutes': tf_min,

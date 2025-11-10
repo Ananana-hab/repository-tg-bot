@@ -160,26 +160,27 @@ class TelegramBot:
                     prediction = analysis['prediction']
                     
                     # Форматируем сообщение с реальными данными
+                    direction = '↗️' if market_data.get('price_change_1h', 0) > 0 else '↘️'
+                    signal_emoji = '🚀' if prediction['signal'] == 'PUMP' else '📉' if prediction['signal'] == 'DUMP' else '↔️'
+                    
                     status_text = f"""
-📊 BTC/USDT Анализ ({mode.upper()} режим)
+📊 BTC/USDT | {mode.upper()}
+━━━━━━━━━━━━━━━━
 
 💰 Цена: ${market_data['current_price']:,.2f}
-📈 Изменение 1h: {market_data.get('price_change_1h', 0):.2f}%
-📊 Изменение 4h: {market_data.get('price_change_4h', 0):.2f}%
-📉 24h изменение: {market_data.get('stats_24h', {}).get('priceChangePercent', 0):.2f}%
+{direction} 1ч: {market_data.get('price_change_1h', 0):+.2f}%
+{direction} 4ч: {market_data.get('price_change_4h', 0):+.2f}%
+📉 24ч: {market_data.get('stats_24h', {}).get('priceChangePercent', 0):+.2f}%
 
-🔍 Индикаторы:
-• RSI (14): {indicators['rsi']:.1f} {'📈' if indicators['rsi'] > 50 else '📉'}
-• MACD: {'Бычий' if indicators.get('macd_crossover') == 'bullish' else 'Медвежий' if indicators.get('macd_crossover') == 'bearish' else 'Нейтральный'}
-• Bollinger: {self._get_bb_status(indicators)}
+📊 АКТИВНОСТЬ:
 • Объём: {self._get_volume_status(indicators)}
-• Fear & Greed: {indicators.get('fear_greed', 50)}
+• Bollinger: {self._get_bb_status(indicators)}
+• Momentum: {'Растёт' if indicators.get('momentum', 0) > 0 else 'Падает'}
 
-🎯 Прогноз: {prediction['signal']}
-Вероятность: {prediction['probability']*100:.1f}%
-Confidence: {prediction['confidence']}
+{signal_emoji} ПРОГНОЗ: {prediction['signal']}
+🎯 Уверенность: {prediction['confidence']} ({prediction['probability']*100:.0f}%)
 
-⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}
                     """
                 else:
                     status_text = "⚠️ Не удалось получить данные анализа. Попробуйте позже."
@@ -229,7 +230,7 @@ Confidence: {prediction['confidence']}
                     stats_text += "\n"
 
             stats_text += f"📈 Всего сигналов: {total_signals}\n"
-            stats_text += f"⏰ {datetime.now().strftime('%H:%M:%S UTC')}"
+            stats_text += f"⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}"
 
             await self.send_with_retry(chat_id=message.chat_id, text=stats_text)
 
@@ -495,86 +496,69 @@ Confidence: {prediction['confidence']}
     def format_day_trading_message(self, signal_data, market_data):
         """
         Форматирует сообщение для дейтрейдинга с учетом специфики
-        
-        Args:
-            signal_data: dict с данными сигнала
-            market_data: dict с рыночными данными
-            
-        Returns:
-            str: Отформатированное сообщение
         """
         day_details = signal_data.get('day_trading_details', {})
         
-        # Эмодзи для трендов и действий
-        trend_emoji = {
-            'up': '📈',
-            'down': '📉',
-            'sideways': '↔️'
-        }
+        # Определяем эмодзи
+        signal_emoji = '🚀' if signal_data['signal'] == 'PUMP' else '📉' if signal_data['signal'] == 'DUMP' else '⚡'
+        direction = '↗️' if signal_data['signal'] == 'PUMP' else '↘️' if signal_data['signal'] == 'DUMP' else '↔️'
         
-        action_emoji = {
-            'EXECUTE': '🎯',
-            'PREPARE': '⚡',
-            'MONITOR': '👀',
-            'WAIT_VOLUME': '📊'
-        }
+        # Сила сигнала (8-10 = HIGH, 6-7 = MEDIUM)
+        strength = int(signal_data['probability'] * 10)
         
-        # Определяем срочность сообщения
-        urgency = ''
-        if signal_data['action'] == 'EXECUTE' and signal_data['confidence'] == 'HIGH':
-            urgency = '🔥 СРОЧНО! 🔥\n'
-        
-        # Формируем основной текст
-        message = f"""{urgency}
-{action_emoji[signal_data['action']]} DAYTRADING СИГНАЛ: {signal_data['signal']}
+        message = f"""
+{signal_emoji} ИМПУЛЬС | DAY TRADING
+━━━━━━━━━━━━━━━━
 
-💰 Текущая цена: ${market_data['current_price']:,.2f}
-📊 Изменение (1h): {market_data['price_change_1h']:+.2f}%
-📈 Тренд: {trend_emoji[day_details['trend']]} {day_details['trend'].upper()}
-💪 Сила тренда: {day_details['trend_strength']:.1f}%
+💰 BTC/USDT
+${market_data['current_price']:,.2f} {direction} {market_data['price_change_1h']:+.2f}% (1ч)
 
-📊 АНАЛИЗ:
-• Волатильность: {day_details['volume_surge']:.1f}x
-• Спред: {day_details['spread']:.3f}%
-• Консолидация: {'Да ✅' if day_details['is_consolidating'] else 'Нет ❌'}
+🔥 ДЕТЕКЦИЯ:
+✅ Изменение за 1ч: {market_data['price_change_1h']:+.2f}%
+✅ Объём: {day_details.get('volume_surge', 1.0):.1f}x от среднего
+✅ Open Interest: {market_data.get('oi_change_5m', 0):+.2f}% (5м)
+✅ Тренд: {day_details.get('trend', 'unknown').upper()}
 
-🎯 РЕКОМЕНДАЦИЯ:
-• Действие: {signal_data['action']}
-• Таймфрейм: {signal_data['timeframe']}
-• Вероятность: {signal_data['probability']:.1%}
-• Уверенность: {signal_data['confidence']}
+🎯 СИЛА СИГНАЛА: {strength}/10
+⚡ УВЕРЕННОСТЬ: {signal_data['confidence']}
 
-⏰ {datetime.now().strftime('%H:%M:%S UTC')}
-
-❗️ Daytrading требует быстрых решений.
-Всегда используйте стоп-лосс!
+⏱ Актуально: 2-15 минут
+⚠️ Быстрая реакция обязательна!
+⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}
 """
         return message
 
     def format_swing_message(self, signal_data, market_data):
         """
         Форматирует сообщение для свинг-трейдинга
-        
-        Args:
-            signal_data: dict с данными сигнала
-            market_data: dict с рыночными данными
-            
-        Returns:
-            str: Отформатированное сообщение
         """
+        # Определяем эмодзи
+        signal_emoji = '🚀' if signal_data['signal'] == 'PUMP' else '📉' if signal_data['signal'] == 'DUMP' else '🔔'
+        direction = '↗️' if signal_data['signal'] == 'PUMP' else '↘️' if signal_data['signal'] == 'DUMP' else '↔️'
+        signal_name = 'РОСТ' if signal_data['signal'] == 'PUMP' else 'ПАДЕНИЕ' if signal_data['signal'] == 'DUMP' else 'СИГНАЛ'
+        
+        # Вычисляем уверенность
+        confidence_text = 'ВЫСОКАЯ' if signal_data['confidence'] == 'HIGH' else 'СРЕДНЯЯ' if signal_data['confidence'] == 'MEDIUM' else 'НИЗКАЯ'
+        confidence_pct = int(signal_data['probability'] * 100)
+        
         return f"""
-🔔 SWING TRADING СИГНАЛ: {signal_data['signal']}
+{signal_emoji} {signal_name} | SWING
+━━━━━━━━━━━━━━━━
 
-💰 Цена: ${market_data['current_price']:,.2f}
-📈 Изменение 1h: {market_data['price_change_1h']:+.2f}%
-📉 Изменение 4h: {market_data['price_change_4h']:+.2f}%
+💰 BTC/USDT
+${market_data['current_price']:,.2f} {direction} {market_data.get('price_change_1h', 0):+.2f}% (1ч)
 
-📊 АНАЛИЗ:
-• Вероятность: {signal_data['probability']:.1%}
-• Уверенность: {signal_data['confidence']}
-• Объем: {market_data.get('volume_change', 0):+.1f}% от среднего
+📊 СИГНАЛЫ:
+✅ Изменение 1ч: {market_data.get('price_change_1h', 0):+.2f}%
+✅ Изменение 4ч: {market_data.get('price_change_4h', 0):+.2f}%
+✅ Объём: {market_data.get('volume_change', 0):+.1f}% от среднего
+✅ Open Interest: {market_data.get('oi_change_4h', 0):+.2f}% (4ч)
 
-⏰ {datetime.now().strftime('%H:%M:%S UTC')}
+🎯 УВЕРЕННОСТЬ: {confidence_text} ({confidence_pct}%)
+⏱ Таймфрейм: 4-24 часа
+
+⚠️ Это анализ, не совет
+⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}
 """
 
     async def send_signal_notification(self, user_id, signal_data, market_data):
@@ -632,26 +616,26 @@ Confidence: {prediction['confidence']}
         signal_emoji = "🚀" if prediction['signal'] == 'PUMP' else "📉"
         confidence_emoji = "🔥" if prediction['confidence'] == 'HIGH' else "⚡" if prediction['confidence'] == 'MEDIUM' else "💡"
         
+        # Определяем направление
+        direction = '↗️' if prediction['signal'] == 'PUMP' else '↘️' if prediction['signal'] == 'DUMP' else '↔️'
+        signal_name = 'РОСТ' if prediction['signal'] == 'PUMP' else 'ПАДЕНИЕ' if prediction['signal'] == 'DUMP' else 'СИГНАЛ'
+        
         message = f"""
-{signal_emoji} {prediction['signal']} SIGNAL {confidence_emoji}
+{signal_emoji} {signal_name} {confidence_emoji}
 
-BTC/USDT
-💰 Цена: ${market_data['current_price']:,.2f}
-📊 Изменение 1h: {market_data['price_change_1h']:+.2f}%
-📈 Изменение 4h: {market_data['price_change_4h']:+.2f}%
+💰 BTC/USDT
+${market_data['current_price']:,.2f} {direction} {market_data['price_change_1h']:+.2f}% (1ч)
 
-🎯 Вероятность: {prediction['probability']:.0%}
-🎚️ Confidence: {prediction['confidence']}
+📊 АНАЛИЗ:
+✅ Изменение 1ч: {market_data['price_change_1h']:+.2f}%
+✅ Изменение 4ч: {market_data['price_change_4h']:+.2f}%
+✅ Объём: {'+' if indicators['is_high_volume'] else ''}{(indicators['volume_ratio'] - 1) * 100:.0f}% от среднего
+✅ Open Interest: {market_data.get('oi_change_1h', 0):+.2f}% (1ч)
 
-🔍 Индикаторы:
-• RSI: {indicators['rsi']:.1f} {'📈' if indicators['rsi'] > 50 else '📉'}
-• MACD: {indicators['macd_crossover']}
-• Volume: {'+' if indicators['is_high_volume'] else ''}{(indicators['volume_ratio'] - 1) * 100:.0f}% от среднего
-• Fear & Greed: {market_data.get('fear_greed', 'N/A')}
+🎯 УВЕРЕННОСТЬ: {prediction['confidence']} ({prediction['probability']:.0%})
 
-⏰ {datetime.now().strftime('%H:%M:%S UTC')}
-
-⚠️ Это не финансовый совет!
+⚠️ Это анализ, не совет!
+⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}
 """
         
         # Отправляем пользователям с учётом их настроек (троттлинг и батчинг)

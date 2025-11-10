@@ -76,7 +76,7 @@ class BotMonitor:
                 return
         
         try:
-            alert_text = f"🚨 <b>BOT ALERT</b>\n\n{message}\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            alert_text = f"🚨 <b>BOT ALERT</b>\n\n{message}\n\n⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
             await self.bot.send_message(
                 chat_id=self.alert_chat_id,
                 text=alert_text,

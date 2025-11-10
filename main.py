@@ -51,6 +51,7 @@ class BTCPumpDumpBot:
         
         self.last_signal = None
         self.last_signal_time = None
+        self.last_signal_price = None  # Для анти-спама по цене
         # Режим анализа: 'swing' | 'day' (читаем из config)
         self.current_mode = config.TRADING_MODE
         self._mode_lock = asyncio.Lock()
@@ -225,6 +226,8 @@ class BTCPumpDumpBot:
         
         # Проверяем, не отправляли ли мы похожий сигнал недавно (во избежание спама)
         current_time = time.time()
+        current_price = analysis_result['market_data']['current_price']
+        
         if self.last_signal and self.last_signal_time:
             time_diff = current_time - self.last_signal_time
             
@@ -232,6 +235,20 @@ class BTCPumpDumpBot:
             if time_diff < 1800 and self.last_signal == prediction['signal']:
                 logger.info(f"Same signal sent recently ({time_diff/60:.1f} min ago), skipping")
                 return
+        
+        # Анти-спам: проверяем изменение цены (минимум 0.15%)
+        if self.last_signal_price:
+            price_change_pct = abs(
+                (current_price - self.last_signal_price) / self.last_signal_price * 100
+            )
+            if price_change_pct < 0.15:
+                logger.info(
+                    f"Price change too small: {price_change_pct:.3f}% "
+                    f"(${self.last_signal_price:,.2f} -> ${current_price:,.2f}), skipping signal"
+                )
+                return
+            else:
+                logger.info(f"Price changed by {price_change_pct:.3f}%, sending new signal")
         
         # Отправляем сигнал
         logger.info(f"🚨 Sending {prediction['signal']} signal to users!")
@@ -254,9 +271,15 @@ class BTCPumpDumpBot:
         users_count = len(self.db.get_subscribed_users())
         self.healthcheck.increment_signals(users_count)
         
-        # Обновляем последний сигнал
+        # Обновляем последний сигнал и цену
         self.last_signal = prediction['signal']
         self.last_signal_time = current_time
+        self.last_signal_price = current_price
+        
+        logger.info(
+            f"✅ Signal sent: {prediction['signal']} at ${current_price:,.2f} "
+            f"({prediction['probability']:.1%} confidence)"
+        )
     
     async def monitoring_loop(self):
         """

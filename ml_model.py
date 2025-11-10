@@ -160,27 +160,17 @@ class MLPredictor:
         score = 0
         reasons = []
         
-        # RSI анализ
-        if indicators['rsi'] > 70:
-            score -= 2
-            reasons.append("RSI перекупленность")
-        elif indicators['rsi'] < 30:
-            score += 2
-            reasons.append("RSI перепроданность")
-        elif indicators['rsi'] > 60:
-            score -= 1
-        elif indicators['rsi'] < 40:
-            score += 1
+        # ✅ Open Interest (НОВОЕ! 3 балла)
+        oi_change = market_data.get('oi_change_1h', 0)
+        if abs(oi_change) > 2.0:  # Сильное изменение OI
+            if oi_change > 0 and market_data.get('price_change_1h', 0) > 0:
+                score += 3
+                reasons.append("Рост OI + рост цены - сильный PUMP")
+            elif oi_change > 0 and market_data.get('price_change_1h', 0) < 0:
+                score -= 3
+                reasons.append("Рост OI + падение цены - сильный DUMP")
         
-        # MACD анализ
-        if indicators['macd_crossover'] == 'bullish':
-            score += 2
-            reasons.append("MACD бычий кроссовер")
-        elif indicators['macd_crossover'] == 'bearish':
-            score -= 2
-            reasons.append("MACD медвежий кроссовер")
-        
-        # Bollinger Bands
+        # Bollinger Bands (3 балла)
         if indicators['bb_position'] == 'below_lower':
             score += 2
             reasons.append("Цена ниже нижней BB")
@@ -188,21 +178,23 @@ class MLPredictor:
             score -= 2
             reasons.append("Цена выше верхней BB")
         
-        # Volume анализ
+        # Volume анализ (2 балла)
         if indicators['is_high_volume']:
             if score > 0:
-                score += 1
+                score += 2
                 reasons.append("Высокий объём подтверждает рост")
             elif score < 0:
-                score -= 1
+                score -= 2
                 reasons.append("Высокий объём подтверждает падение")
         
-        # Price change анализ
-        price_change = market_data['price_change_1h']
-        if price_change > 3:
-            score += 1
-        elif price_change < -3:
-            score -= 1
+        # Price change анализ (2 балла)
+        price_change = market_data.get('price_change_1h', 0)
+        if price_change > 2.5:  # Снижен порог
+            score += 2
+            reasons.append(f"Сильный рост: {price_change:+.2f}%")
+        elif price_change < -2.5:
+            score -= 2
+            reasons.append(f"Сильное падение: {price_change:+.2f}%")
         
         # Fear & Greed Index
         if market_data['fear_greed']:
@@ -214,12 +206,19 @@ class MLPredictor:
                 score += 1
                 reasons.append("Extreme Fear - возможен отскок")
         
-        # Momentum
-        if indicators['momentum'] > 0:
+        # Momentum (2 балла)
+        momentum = indicators.get('momentum', 0)
+        if momentum > 300:  # Сильный импульс
+            score += 2
+            reasons.append("Сильный восходящий momentum")
+        elif momentum < -300:
+            score -= 2
+            reasons.append("Сильный нисходящий momentum")
+        elif momentum > 0:
             score += 1
-        else:
+        elif momentum < 0:
             score -= 1
-
+        
         # VWAP side
         try:
             vwap = indicators.get('vwap')
@@ -417,7 +416,3 @@ class MLPredictor:
                 'conditions_met': indicators.get('is_valid_for_daytrading', False)
             }
         }
-        if prediction['signal'] == 'DUMP':
-            return prediction['probability'] >= config.DUMP_THRESHOLD
-        
-        return False

@@ -216,16 +216,15 @@ class TechnicalIndicators:
             return None
         
         try:
-            # RSI
-            rsi = TechnicalIndicators.calculate_rsi(df, config.RSI_PERIOD)
-            
-            # MACD
-            macd_data = TechnicalIndicators.calculate_macd(
-                df,
-                config.MACD_FAST,
-                config.MACD_SLOW,
-                config.MACD_SIGNAL
-            )
+            # RSI и MACD удалены - запаздывают на 60-130 минут
+            # Оставляем заглушки для совместимости
+            rsi = 50.0  # Нейтральное значение
+            macd_data = {
+                'macd': 0.0,
+                'signal': 0.0,
+                'histogram': 0.0,
+                'crossover': 'none'
+            }
             
             # Bollinger Bands
             bb_data = TechnicalIndicators.calculate_bollinger_bands(df, config.BOLLINGER_PERIOD)
@@ -243,18 +242,20 @@ class TechnicalIndicators:
             # ATR
             atr = TechnicalIndicators.calculate_atr(df, 14)
 
-            # ✅ VWAP (исправленный - может вернуть None)
+            # VWAP (исправленный - может вернуть None)
             vwap = TechnicalIndicators.calculate_vwap(df)
 
             # Orderbook imbalance (безопасный - всегда возвращает число)
             ob_imbalance = TechnicalIndicators.orderbook_imbalance(orderbook) if orderbook else 0.0
             
             indicators = {
+                # RSI и MACD - заглушки (не используются)
                 'rsi': rsi,
                 'macd': macd_data['macd'],
                 'macd_signal': macd_data['signal'],
                 'macd_histogram': macd_data['histogram'],
                 'macd_crossover': macd_data['crossover'],
+                # Активные индикаторы
                 'bb_upper': bb_data['upper'],
                 'bb_middle': bb_data['middle'],
                 'bb_lower': bb_data['lower'],
@@ -265,7 +266,7 @@ class TechnicalIndicators:
                 'is_high_volume': volume_data['is_high'],
                 'momentum': momentum,
                 'atr': atr,
-                'vwap': vwap,  # ✅ Может быть None - это нормально!
+                'vwap': vwap,
                 'orderbook_imbalance': ob_imbalance
             }
             
@@ -278,7 +279,7 @@ class TechnicalIndicators:
                         'is_valid_for_daytrading': TechnicalIndicators.validate_day_trading_conditions(indicators, day_indicators)[0]
                     })
             
-            logger.info(f"Indicators calculated for {mode} mode: RSI={rsi:.2f}, MACD crossover={macd_data['crossover']}, VWAP={'OK' if vwap else 'None'}")
+            logger.info(f"Indicators calculated for {mode} mode: Volume={volume_data['volume_ratio']:.2f}x, Momentum={momentum:.2f}, VWAP={'OK' if vwap else 'None'}")
             return indicators
             
         except Exception as e:
@@ -391,11 +392,12 @@ class TechnicalIndicators:
         if day_indicators['trend_strength'] < day_config['volatility_threshold']:
             return False, "Слабый тренд"
             
-        # Проверка RSI
-        if indicators['rsi'] > day_config['rsi_overbought']:
-            return False, "Перекупленность по RSI"
-        elif indicators['rsi'] < day_config['rsi_oversold']:
-            return False, "Перепроданность по RSI"
+        # ❌ Проверка RSI удалена - используем Bollinger Bands
+        # Проверка перекупленности/перепроданности через BB
+        if indicators.get('bb_position') == 'above_upper':
+            return False, "Перекупленность (цена выше верхней BB)"
+        elif indicators.get('bb_position') == 'below_lower':
+            return False, "Перепроданность (цена ниже нижней BB)"
             
         return True, "Условия подходят для дейтрейдинга"
 
@@ -403,41 +405,43 @@ class TechnicalIndicators:
     def get_signal_strength(indicators, price_change):
         """
         Определяет силу сигнала на основе индикаторов
+        ❌ RSI и MACD удалены - используем Volume, Momentum, BB
         
         Returns:
             str: 'STRONG', 'MEDIUM', 'WEAK'
         """
         score = 0
         
-        # RSI
-        if indicators['rsi'] > 70:
-            score += 2  # Сильный сигнал дампа
-        elif indicators['rsi'] < 30:
-            score += 2  # Сильный сигнал пампа
-        elif 60 < indicators['rsi'] < 70 or 30 < indicators['rsi'] < 40:
-            score += 1  # Средний сигнал
+        # Bollinger Bands (4 балла)
+        if indicators.get('bb_position') in ['above_upper', 'below_lower']:
+            score += 4
         
-        # MACD Crossover
-        if indicators['macd_crossover'] in ['bullish', 'bearish']:
-            score += 2
+        # Volume (3 балла)
+        if indicators.get('is_high_volume'):
+            score += 3
+            # Дополнительно за сильный всплеск
+            if indicators.get('volume_ratio', 1) > 2.5:
+                score += 2
         
-        # Bollinger Bands
-        if indicators['bb_position'] in ['above_upper', 'below_lower']:
-            score += 2
-        
-        # Volume
-        if indicators['is_high_volume']:
+        # Momentum (3 балла)
+        momentum = indicators.get('momentum', 0)
+        if abs(momentum) > 500:  # Сильный импульс
+            score += 3
+        elif abs(momentum) > 200:  # Средний импульс
             score += 1
         
-        # Price change
+        # Price change (3 балла)
         if abs(price_change) > 5:
-            score += 2
+            score += 3
         elif abs(price_change) > 3:
+            score += 2
+        elif abs(price_change) > 1.5:
             score += 1
         
-        if score >= 6:
+        # Scoring: max ~15 баллов
+        if score >= 10:
             return 'STRONG'
-        elif score >= 4:
+        elif score >= 6:
             return 'MEDIUM'
         else:
             return 'WEAK'

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram Bot Token (получить у @BotFather)
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+TELEGRAM_BOT_TOKEN = os.getenv('7410301345:AAGGyw8Nj1Wp-KPTVlxUycQy3uFJ2V4XWj4', 'YOUR_BOT_TOKEN_HERE')
 
 # Binance API (опционально, для получения данных используем публичный API)
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
