@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram Bot Token (получить у @BotFather)
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+TELEGRAM_BOT_TOKEN = os.getenv('7410301345:AAGcXIHsOWuqVypqbtZk5izkPpLdGNU8y8M', 'YOUR_BOT_TOKEN_HERE')
 
 # Binance API (опционально, для получения данных используем публичный API)
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -26,6 +26,13 @@ MACD_SIGNAL = 9
 BOLLINGER_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 
+# Дополнительные пороги для rule-based логики (безопасные значения по умолчанию)
+# Дисбаланс стакана (|imbalance| > 0.10 считается значимым)
+OB_IMBALANCE_THRESHOLD = 0.10
+# Усиление при сильном всплеске объёма (в X раз от среднего)
+VOLUME_SPIKE_RATIO = 2.5
+# Порог "низкой волатильности" через ATR относительно цены (0.5%)
+ATR_LOW_RATIO = 0.005
 # Пороги для сигналов
 PUMP_THRESHOLD = 0.70  # 70% вероятность для сигнала PUMP
 DUMP_THRESHOLD = 0.70  # 70% вероятность для сигнала DUMP
@@ -123,3 +130,27 @@ API_RETRY_DELAY = 2  # секунды
 
 # Graceful shutdown timeout
 SHUTDOWN_TIMEOUT = 30  # секунды
+
+# ✅ ML Model настройки
+USE_ML_MODEL = os.getenv('USE_ML_MODEL', 'False').lower() == 'true'  # Включить ML модель
+MODEL_DIR = 'models'  # Директория для сохранения моделей
+MODEL_PATH = f'{MODEL_DIR}/btc_model.pkl'
+SCALER_PATH = f'{MODEL_DIR}/scaler.pkl'
+MODEL_METADATA_PATH = f'{MODEL_DIR}/model_metadata.json'
+
+# Параметры обучения
+ML_TRAINING_DAYS = 90  # Количество дней истории для обучения
+ML_HORIZON_MINUTES = 60  # Горизонт прогноза (минуты)
+ML_PUMP_THRESHOLD = 2.5  # Порог для PUMP (%)
+ML_DUMP_THRESHOLD = -2.5  # Порог для DUMP (%)
+ML_MIN_SAMPLES_PER_CLASS = 100  # Минимальное количество примеров на класс
+
+# Параметры модели
+ML_N_ESTIMATORS = 200  # Количество деревьев
+ML_MAX_DEPTH = 15  # Максимальная глубина дерева
+ML_MIN_SAMPLES_LEAF = 5  # Минимальное количество образцов в листе
+ML_RANDOM_STATE = 42  # Для воспроизводимости
+
+# Минимальные метрики для продакшена
+ML_MIN_F1_MACRO = 0.45  # Минимальный macro F1
+ML_MIN_PRECISION = 0.55  # Минимальная precision для PUMP/DUMP

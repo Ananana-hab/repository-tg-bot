@@ -132,7 +132,7 @@ class BTCPumpDumpBot:
             
             logger.info(f"Analysis complete: {prediction['signal']} ({prediction['probability']:.2%})")
             logger.info(f"Current price: ${market_data['current_price']:,.2f}")
-            logger.info(f"RSI: {indicators['rsi']:.2f}, MACD crossover: {indicators['macd_crossover']}")
+            logger.info(f"BB position: {indicators.get('bb_position', 'N/A')}, Volume ratio: {indicators.get('volume_ratio', 0):.2f}x")
             
             # Обновляем healthcheck метрики
             self.healthcheck.update_analysis_time()
@@ -199,7 +199,7 @@ class BTCPumpDumpBot:
             
             logger.info(f"Analysis complete: {prediction['signal']} ({prediction['probability']:.2%})")
             logger.info(f"Current price: ${market_data['current_price']:,.2f}")
-            logger.info(f"RSI: {indicators['rsi']:.2f}, MACD crossover: {indicators['macd_crossover']}")
+            logger.info(f"BB position: {indicators.get('bb_position', 'N/A')}, Volume ratio: {indicators.get('volume_ratio', 0):.2f}x")
             
             return result
             

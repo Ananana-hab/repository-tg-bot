@@ -106,13 +106,10 @@ class Database:
             
             cursor.execute('''
                 INSERT INTO price_data (price, volume, rsi, macd, macd_signal, bb_upper, bb_lower, fear_greed_index)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?)
             ''', (
                 price,
                 volume,
-                indicators.get('rsi'),
-                indicators.get('macd'),
-                indicators.get('macd_signal'),
                 indicators.get('bb_upper'),
                 indicators.get('bb_lower'),
                 indicators.get('fear_greed')

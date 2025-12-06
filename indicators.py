@@ -216,16 +216,6 @@ class TechnicalIndicators:
             return None
         
         try:
-            # RSI и MACD удалены - запаздывают на 60-130 минут
-            # Оставляем заглушки для совместимости
-            rsi = 50.0  # Нейтральное значение
-            macd_data = {
-                'macd': 0.0,
-                'signal': 0.0,
-                'histogram': 0.0,
-                'crossover': 'none'
-            }
-            
             # Bollinger Bands
             bb_data = TechnicalIndicators.calculate_bollinger_bands(df, config.BOLLINGER_PERIOD)
             
@@ -249,12 +239,6 @@ class TechnicalIndicators:
             ob_imbalance = TechnicalIndicators.orderbook_imbalance(orderbook) if orderbook else 0.0
             
             indicators = {
-                # RSI и MACD - заглушки (не используются)
-                'rsi': rsi,
-                'macd': macd_data['macd'],
-                'macd_signal': macd_data['signal'],
-                'macd_histogram': macd_data['histogram'],
-                'macd_crossover': macd_data['crossover'],
                 # Активные индикаторы
                 'bb_upper': bb_data['upper'],
                 'bb_middle': bb_data['middle'],

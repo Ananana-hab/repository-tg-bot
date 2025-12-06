@@ -331,6 +331,21 @@ class DataCollector:
         if current is None:
             logger.error("Failed to fetch current price")
             return None
+
+        # Расчёт метрик объёма относительно среднего
+        try:
+            avg_volume = df['volume'].rolling(window=config.VOLUME_MA_PERIOD).mean().iloc[-1]
+            current_vol = float(df['volume'].iloc[-1])
+            if avg_volume and avg_volume > 0:
+                volume_ratio = current_vol / avg_volume
+                volume_change_pct = (volume_ratio - 1.0) * 100.0
+            else:
+                volume_ratio = 1.0
+                volume_change_pct = 0.0
+        except Exception as e:
+            logger.debug(f"Volume metrics calc error: {e}")
+            volume_ratio = 1.0
+            volume_change_pct = 0.0
         
         # Fear & Greed Index (с кэшем)
         fear_greed = self.get_fear_greed_index()
@@ -363,6 +378,9 @@ class DataCollector:
             'oi_change_5m': open_interest['change_5m'],
             'oi_change_1h': open_interest['change_1h'],
             'oi_change_4h': open_interest['change_4h'],
+            # ✅ Метрики объёма
+            'volume_ratio': volume_ratio,
+            'volume_change_pct': round(volume_change_pct, 1),
             # ✅ Метаданные для отладки
             'timeframe': tf,
             'timeframe_minutes': tf_min,

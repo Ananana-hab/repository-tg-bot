@@ -15,11 +15,15 @@ class MLPredictor:
     def __init__(self):
         self.model = None
         self.scaler = StandardScaler()
-        self.model_path = 'btc_model.pkl'
-        self.scaler_path = 'scaler.pkl'
+        self.model_path = config.MODEL_PATH
+        self.scaler_path = config.SCALER_PATH
+        self.use_ml = config.USE_ML_MODEL
         
         # Попытка загрузить существующую модель
-        self.load_model()
+        if self.use_ml:
+            self.load_model()
+        else:
+            logger.info("ML model disabled, using rule-based prediction")
     
     def prepare_features(self, indicators, market_data, mode='swing'):
         """
@@ -33,25 +37,38 @@ class MLPredictor:
         Returns:
             numpy array: вектор признаков
         """
+        # Порядок фичей должен совпадать с train.py!
         features = [
-            indicators['rsi'],
-            indicators['macd'],
-            indicators['macd_signal'],
-            indicators['macd_histogram'],
-            1 if indicators['macd_crossover'] == 'bullish' else -1 if indicators['macd_crossover'] == 'bearish' else 0,
+            # Bollinger Bands
             indicators['bb_upper'],
             indicators['bb_lower'],
-            1 if indicators['bb_position'] == 'above_upper' else -1 if indicators['bb_position'] == 'below_lower' else 0,
+            indicators.get('bb_middle', 0),
+            1 if indicators['bb_position'] == 'above_upper' else 0,  # bb_position_above
+            1 if indicators['bb_position'] == 'below_lower' else 0,  # bb_position_below
+            # EMA
             indicators['ema_50'],
             indicators['ema_200'] if indicators['ema_200'] else indicators['ema_50'],
+            # Volume
             indicators['volume_ratio'],
             1 if indicators['is_high_volume'] else 0,
+            # Momentum & Volatility
             indicators['momentum'],
             indicators['atr'],
+            # VWAP
+            indicators.get('vwap', 0) if indicators.get('vwap') else 0,
+            # Orderbook
+            indicators.get('orderbook_imbalance', 0),
+            # Market sentiment
+            market_data['fear_greed'] if market_data.get('fear_greed') else 50,
+            # Volume
+            market_data['current_volume'],
+            # Price changes
             market_data['price_change_1h'],
             market_data['price_change_4h'],
-            market_data['fear_greed'] if market_data['fear_greed'] else 50,
-            market_data['current_volume']
+            # Open Interest changes
+            market_data.get('oi_change_5m', 0),
+            market_data.get('oi_change_1h', 0),
+            market_data.get('oi_change_4h', 0),
         ]
         
         # Добавляем специфические features для дейтрейдинга
@@ -101,8 +118,8 @@ class MLPredictor:
                 'action': str (только для day режима)
             }
         """
-        # Если модель не обучена, используем rule-based подход
-        if self.model is None:
+        # Если ML отключен или модель не загружена, используем rule-based
+        if not self.use_ml or self.model is None:
             return self.rule_based_prediction(indicators, market_data)
         
         try:
@@ -307,16 +324,22 @@ class MLPredictor:
     
     def load_model(self):
         """Загружает модель с диска"""
+        if not self.use_ml:
+            logger.debug("ML model disabled in config")
+            return
+            
         if os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
             try:
                 self.model = joblib.load(self.model_path)
                 self.scaler = joblib.load(self.scaler_path)
-                logger.info("Model loaded successfully")
+                logger.info(f"✅ ML model loaded from {self.model_path}")
             except Exception as e:
                 logger.warning(f"Could not load model: {e}")
                 self.model = None
         else:
-            logger.info("No trained model found, using rule-based approach")
+            logger.warning(f"ML model files not found: {self.model_path}, {self.scaler_path}")
+            logger.info("Falling back to rule-based prediction")
+            self.model = None
     
     def should_send_signal(self, prediction):
         """

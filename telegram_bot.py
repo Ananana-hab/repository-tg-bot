@@ -170,7 +170,7 @@ class TelegramBot:
 💰 Цена: ${market_data['current_price']:,.2f}
 {direction} 1ч: {market_data.get('price_change_1h', 0):+.2f}%
 {direction} 4ч: {market_data.get('price_change_4h', 0):+.2f}%
-📉 24ч: {market_data.get('stats_24h', {}).get('priceChangePercent', 0):+.2f}%
+📉 24ч: {market_data.get('stats_24h', {}).get('price_change_24h', 0):+.2f}%
 
 📊 АКТИВНОСТЬ:
 • Объём: {self._get_volume_status(indicators)}
@@ -551,7 +551,7 @@ ${market_data['current_price']:,.2f} {direction} {market_data.get('price_change_
 📊 СИГНАЛЫ:
 ✅ Изменение 1ч: {market_data.get('price_change_1h', 0):+.2f}%
 ✅ Изменение 4ч: {market_data.get('price_change_4h', 0):+.2f}%
-✅ Объём: {market_data.get('volume_change', 0):+.1f}% от среднего
+✅ Объём: {market_data.get('volume_change_pct', 0):+.1f}% от среднего
 ✅ Open Interest: {market_data.get('oi_change_4h', 0):+.2f}% (4ч)
 
 🎯 УВЕРЕННОСТЬ: {confidence_text} ({confidence_pct}%)
