@@ -50,6 +50,66 @@ class TechnicalIndicators:
         }
     
     @staticmethod
+    def calculate_stochastic(df, k_period=14, d_period=3, smooth=3):
+        """
+        Расчёт Stochastic Oscillator
+        
+        %K > 80 = Перекупленность
+        %K < 20 = Перепроданность
+        %K пересекает %D снизу вверх = Bullish
+        %K пересекает %D сверху вниз = Bearish
+        """
+        try:
+            # Calculate %K
+            lowest_low = df['low'].rolling(window=k_period).min()
+            highest_high = df['high'].rolling(window=k_period).max()
+            
+            # Защита от деления на ноль
+            range_hl = highest_high - lowest_low
+            range_hl = range_hl.replace(0, np.nan)
+            
+            k_percent = 100 * ((df['close'] - lowest_low) / range_hl)
+            
+            # Smooth %K
+            k_smooth = k_percent.rolling(window=smooth).mean()
+            
+            # Calculate %D (signal line)
+            d_percent = k_smooth.rolling(window=d_period).mean()
+            
+            # Проверка на валидность
+            k_val = k_smooth.iloc[-1]
+            d_val = d_percent.iloc[-1]
+            
+            if pd.isna(k_val) or pd.isna(d_val):
+                return {
+                    'k': 50.0,
+                    'd': 50.0,
+                    'crossover': 'none'
+                }
+            
+            # Определение кроссовера
+            crossover = 'none'
+            if len(k_smooth) >= 2 and len(d_percent) >= 2:
+                if k_smooth.iloc[-1] > d_percent.iloc[-1] and k_smooth.iloc[-2] <= d_percent.iloc[-2]:
+                    crossover = 'bullish'
+                elif k_smooth.iloc[-1] < d_percent.iloc[-1] and k_smooth.iloc[-2] >= d_percent.iloc[-2]:
+                    crossover = 'bearish'
+            
+            return {
+                'k': float(k_val),
+                'd': float(d_val),
+                'crossover': crossover
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating Stochastic: {e}")
+            return {
+                'k': 50.0,
+                'd': 50.0,
+                'crossover': 'none'
+            }
+    
+    @staticmethod
     def calculate_bollinger_bands(df, period=20, std_dev=2):
         """
         Расчёт Bollinger Bands
@@ -238,6 +298,14 @@ class TechnicalIndicators:
             # Orderbook imbalance (безопасный - всегда возвращает число)
             ob_imbalance = TechnicalIndicators.orderbook_imbalance(orderbook) if orderbook else 0.0
             
+            # ✅ НОВОЕ: RSI - для обоих режимов
+            rsi = TechnicalIndicators.calculate_rsi(df, 14)
+            
+            # ✅ НОВОЕ: MACD - только для swing режима
+            macd_data = None
+            if mode == 'swing':
+                macd_data = TechnicalIndicators.calculate_macd(df, 12, 26, 9)
+            
             indicators = {
                 # Активные индикаторы
                 'bb_upper': bb_data['upper'],
@@ -251,7 +319,16 @@ class TechnicalIndicators:
                 'momentum': momentum,
                 'atr': atr,
                 'vwap': vwap,
-                'orderbook_imbalance': ob_imbalance
+                'orderbook_imbalance': ob_imbalance,
+                
+                # ✅ НОВОЕ: RSI (оба режима)
+                'rsi': rsi,
+                
+                # ✅ НОВОЕ: MACD (только swing)
+                'macd': macd_data['macd'] if macd_data else None,
+                'macd_signal': macd_data['signal'] if macd_data else None,
+                'macd_histogram': macd_data['histogram'] if macd_data else None,
+                'macd_crossover': macd_data['crossover'] if macd_data else 'none'
             }
             
             # Добавляем индикаторы дейтрейдинга если нужно
@@ -310,6 +387,9 @@ class TechnicalIndicators:
             # Импульс цены
             price_momentum = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
             
+            # ✅ НОВОЕ: Stochastic для day trading
+            stoch_data = TechnicalIndicators.calculate_stochastic(df, 14, 3, 3)
+            
             # Спред
             if orderbook:
                 best_bid = float(orderbook['bids'][0][0])
@@ -329,13 +409,21 @@ class TechnicalIndicators:
                 'current_spread': current_spread,
                 'ma_fast': fast_ma.iloc[-1],
                 'ma_slow': slow_ma.iloc[-1],
+                
+                # ✅ НОВОЕ: Stochastic
+                'stochastic_k': stoch_data['k'],
+                'stochastic_d': stoch_data['d'],
+                'stochastic_crossover': stoch_data['crossover'],
+                
                 'signals': {
                     'ma_cross': 'buy' if (fast_ma.iloc[-1] > slow_ma.iloc[-1] and 
                                         fast_ma.iloc[-2] <= slow_ma.iloc[-2]) else
                               'sell' if (fast_ma.iloc[-1] < slow_ma.iloc[-1] and 
                                        fast_ma.iloc[-2] >= slow_ma.iloc[-2]) else None,
                     'volume_confirmed': volume_surge > day_config['volume_increase_threshold'],
-                    'spread_ok': current_spread < day_config['max_spread']
+                    'spread_ok': current_spread < day_config['max_spread'],
+                    # ✅ НОВОЕ: Stochastic signal
+                    'stochastic_signal': stoch_data['crossover']
                 }
             }
             

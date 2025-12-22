@@ -1,140 +1,196 @@
-import ccxt
-import requests
+import ccxt.async_support as ccxt
+from ccxt.base.errors import RateLimitExceeded, NetworkError, ExchangeError, RequestTimeout
+import aiohttp
+import asyncio
 import config
 import logging
 from datetime import datetime, timedelta
 import pandas as pd
+import time
 
 logging.basicConfig(level=config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 class DataCollector:
     def __init__(self):
-        # Инициализируем Binance без API ключей (публичные данные)
+        # Инициализируем Async Binance без API ключей (публичные данные)
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
         })
         # Кэш для FNG
         self._fng_cache = {'value': None, 'ts': None}
-        # Кэш для Open Interest (обновляется каждые 5 минут)
+        # Кэш для Open Interest
         self._oi_cache = {'value': None, 'ts': None, 'history': []}
         
-    def get_current_price(self):
-        """Получает текущую цену BTC/USDT"""
+    async def close(self):
+        """Закрывает соединение с биржей"""
+        await self.exchange.close()
+        
+    async def get_current_price(self):
+        """Получает текущую цену BTC/USDT асинхронно"""
         try:
-            ticker = self.exchange.fetch_ticker(config.SYMBOL)
+            ticker = await self.exchange.fetch_ticker(config.SYMBOL)
             return {
-                'price': ticker['last'],
-                'volume': ticker['quoteVolume'],
+                'price': float(ticker['last']),
+                'volume': float(ticker['quoteVolume']),
                 'timestamp': datetime.now()
             }
         except Exception as e:
             logger.error(f"Error fetching price: {e}")
             return None
     
-    def get_ohlcv_data(self, timeframe='5m', limit=100):
+    async def get_ohlcv_data(self, timeframe='5m', limit=100):
         """
-        Получает OHLCV данные (Open, High, Low, Close, Volume)
+        Получает OHLCV данные асинхронно
+        """
+        max_retries = 3
+        retry_delay = 2
         
-        Args:
-            timeframe: Таймфрейм ('1m', '5m', '15m', '1h', '4h', '1d')
-            limit: Количество свечей
-        
-        Returns:
-            DataFrame с колонками: timestamp, open, high, low, close, volume
-        """
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(
-                config.SYMBOL,
-                timeframe=timeframe,
-                limit=limit
-            )
-            
-            df = pd.DataFrame(
-                ohlcv,
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
-            
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            
-            logger.info(f"Fetched {len(df)} candles for {config.SYMBOL} ({timeframe})")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error fetching OHLCV data: {e}")
-            return None
-    
-    def get_orderbook(self, limit=20):
-        """Получает стакан ордеров (bid/ask)"""
-        try:
-            orderbook = self.exchange.fetch_order_book(config.SYMBOL, limit)
-            
-            return {
-                'bids': orderbook['bids'],  # Заявки на покупку
-                'asks': orderbook['asks'],  # Заявки на продажу
-                'bid_volume': sum([bid[1] for bid in orderbook['bids']]),
-                'ask_volume': sum([ask[1] for ask in orderbook['asks']])
-            }
-        except Exception as e:
-            logger.error(f"Error fetching orderbook: {e}")
-            return None
-    
-    def get_fear_greed_index(self):
-        """
-        Получает Fear & Greed Index из Alternative.me API с кэшированием
-        
-        Returns:
-            int: Значение от 0 (Extreme Fear) до 100 (Extreme Greed)
-        """
-        try:
-            now = datetime.now()
-            # Кэш TTL 5 минут
-            if self._fng_cache['ts'] and (now - self._fng_cache['ts']).seconds < 300:
-                logger.debug(f"Using cached F&G: {self._fng_cache['value']}")
-                return self._fng_cache['value']
-
-            # Ретраи через Session + HTTPAdapter
-            session = requests.Session()
+        for attempt in range(max_retries):
             try:
-                adapter = requests.adapters.HTTPAdapter(max_retries=3)
-                session.mount('https://', adapter)
-                session.mount('http://', adapter)
-            except Exception:
-                pass
-
-            response = session.get(config.FEAR_GREED_API, timeout=5)
-            data = response.json()
+                ohlcv = await self.exchange.fetch_ohlcv(config.SYMBOL, timeframe, limit=limit)
+                
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                
+                # Приводим к типам (на всякий случай)
+                cols = ['open', 'high', 'low', 'close', 'volume']
+                df[cols] = df[cols].apply(pd.to_numeric, errors='coerce')
+                
+                return df
+                
+            except (NetworkError, RequestTimeout) as e:
+                logger.warning(f"Network error fetching OHLCV (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error("Max retries exceeded for OHLCV")
+                    return None
+            except Exception as e:
+                logger.error(f"Error fetching OHLCV: {e}")
+                return None
+    
+    async def get_order_book(self, limit=20):
+        """Получает стакан заявок асинхронно"""
+        try:
+            orderbook = await self.exchange.fetch_order_book(config.SYMBOL, limit)
+            # Возвращаем в том же формате, что и раньше, для совместимости?
+            # Или просто сырой, но старый код ожидал dict['bids']... ccxt возвращает dict с bids/asks
+            return orderbook
+        except Exception as e:
+            logger.error(f"Error fetching order book: {e}")
+            return None
             
-            value = None
-            if data and 'data' in data and len(data['data']) > 0:
-                value = int(data['data'][0]['value'])
-                classification = data['data'][0]['value_classification']
-                logger.info(f"Fear & Greed Index: {value} ({classification})")
+    async def get_fear_greed_index(self):
+        """Получает индекс страха и жадности (Alternative.me API) асинхронно"""
+        # Проверяем кэш (TTL 1 час)
+        now = datetime.now()
+        if (self._fng_cache['value'] is not None and 
+            self._fng_cache['ts'] is not None and 
+            (now - self._fng_cache['ts']).total_seconds() < 3600):
+            return self._fng_cache['value']
 
-            if value is None:
-                # fallback значение
-                value = 50
-                logger.warning("F&G returned None, using default: 50")
-
-            self._fng_cache = {'value': value, 'ts': now}
-            return value
-            
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(config.FEAR_GREED_API, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data and 'data' in data and len(data['data']) > 0:
+                            value = int(data['data'][0]['value'])
+                            self._fng_cache = {'value': value, 'ts': now}
+                            logger.info(f"Fear & Greed Index updated: {value}")
+                            return value
+                        
+            return self._fng_cache['value'] if self._fng_cache['value'] else 50
         except Exception as e:
             logger.error(f"Error fetching Fear & Greed Index: {e}")
-            # Возвращаем кэш или дефолт
-            cached_value = self._fng_cache['value']
-            if cached_value is not None:
-                logger.warning(f"Using cached F&G value: {cached_value}")
-                return cached_value
-            else:
-                logger.warning("No cache available, using default: 50")
-                return 50
-    
-    def get_24h_stats(self):
+            return self._fng_cache['value'] if self._fng_cache['value'] else 50
+
+    async def get_open_interest(self):
+        """Получает Open Interest асинхронно (с кэшированием)"""
+        now = datetime.now()
+        # Кэш на 5 минут
+        if (self._oi_cache['value'] is not None and 
+            self._oi_cache['ts'] is not None and 
+            (now - self._oi_cache['ts']).total_seconds() < 300):
+             return self._oi_cache['value']
+             
+        try:
+            # Прямой запрос к binance api для фьючерсов
+            url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={config.SYMBOL.replace('/', '')}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        current_oi = float(data['openInterest'])
+                        
+                        # Сохраняем историю
+                        self._oi_cache['history'].append({'timestamp': now, 'value': current_oi})
+                        cutoff = now - timedelta(hours=5)
+                        self._oi_cache['history'] = [x for x in self._oi_cache['history'] if x['timestamp'] > cutoff]
+                        
+                        # Вычисляем изменения
+                        change_5m = self._calculate_oi_change(minutes=5)
+                        change_1h = self._calculate_oi_change(minutes=60)
+                        change_4h = self._calculate_oi_change(minutes=240)
+                        
+                        result = {
+                            'value': current_oi,
+                            'change_5m': change_5m,
+                            'change_1h': change_1h,
+                            'change_4h': change_4h,
+                            'timestamp': now
+                        }
+                        
+                        self._oi_cache['value'] = result
+                        self._oi_cache['ts'] = now
+                        
+                        logger.info(f"Open Interest updated: {current_oi}")
+                        return result
+                    
+            return self._get_cached_oi_or_default()
+            
+        except Exception as e:
+            logger.debug(f"Could not fetch Open Interest: {e}")
+            return self._get_cached_oi_or_default()
+
+    def _calculate_oi_change(self, minutes):
+        """Вычисляет изменение OI за указанный период (синхронно, чистая логика)"""
+        try:
+            history = self._oi_cache['history']
+            if len(history) < 2:
+                return 0.0
+            
+            now = datetime.now()
+            target_time = now - timedelta(minutes=minutes)
+            
+            closest = min(history, key=lambda x: abs((x['timestamp'] - target_time).total_seconds()))
+            
+            current_oi = history[-1]['value']
+            past_oi = closest['value']
+            
+            if past_oi == 0: return 0.0
+            return round(((current_oi - past_oi) / past_oi) * 100, 2)
+            
+        except Exception:
+            return 0.0
+
+    def _get_cached_oi_or_default(self):
+        if self._oi_cache['value']: return self._oi_cache['value']
+        return {'value': 0, 'change_5m': 0, 'change_1h': 0, 'change_4h': 0}
+
+    def calculate_price_change(self, df, periods=12):
+        if df is None or len(df) < periods: return 0
+        current = df['close'].iloc[-1]
+        past = df['close'].iloc[-periods]
+        if past == 0: return 0
+        return round(((current - past) / past) * 100, 2)
+
+    async def get_24h_stats(self):
         """Получает статистику за 24 часа"""
         try:
-            ticker = self.exchange.fetch_ticker(config.SYMBOL)
-            
+            ticker = await self.exchange.fetch_ticker(config.SYMBOL)
             return {
                 'price_change_24h': ticker.get('percentage', 0),
                 'high_24h': ticker.get('high', 0),
@@ -144,252 +200,92 @@ class DataCollector:
         except Exception as e:
             logger.error(f"Error fetching 24h stats: {e}")
             return None
-    
-    def get_open_interest(self):
+
+    async def get_market_data(self, timeframe=None, limit=None):
         """
-        Получает текущий Open Interest для BTC/USDT фьючерсов
-        с кэшированием и историей изменений
-        
-        Returns:
-            dict: {
-                'value': текущее значение OI,
-                'change_5m': изменение за 5 минут (%),
-                'change_1h': изменение за 1 час (%),
-                'change_4h': изменение за 4 часа (%)
-            }
-        """
-        try:
-            now = datetime.now()
-            
-            # Запрашиваем текущий OI (всегда свежий)
-            url = 'https://fapi.binance.com/fapi/v1/openInterest'
-            params = {'symbol': 'BTCUSDT'}
-            response = requests.get(url, params=params, timeout=5)
-            
-            if response.status_code != 200:
-                logger.error(f"OI API error: {response.status_code}")
-                return self._get_cached_oi_or_default()
-            
-            data = response.json()
-            current_oi = float(data['openInterest'])
-            
-            # Обновляем историю (храним последние 60 записей = ~5 часов при проверке каждые 5 мин)
-            self._oi_cache['history'].append({
-                'value': current_oi,
-                'timestamp': now
-            })
-            
-            # Обрезаем историю до 60 записей
-            if len(self._oi_cache['history']) > 60:
-                self._oi_cache['history'] = self._oi_cache['history'][-60:]
-            
-            # Вычисляем изменения
-            change_5m = self._calculate_oi_change(minutes=5)
-            change_1h = self._calculate_oi_change(minutes=60)
-            change_4h = self._calculate_oi_change(minutes=240)
-            
-            result = {
-                'value': current_oi,
-                'change_5m': change_5m,
-                'change_1h': change_1h,
-                'change_4h': change_4h,
-                'timestamp': now
-            }
-            
-            # Обновляем кэш
-            self._oi_cache['value'] = result
-            self._oi_cache['ts'] = now
-            
-            logger.info(
-                f"Open Interest: {current_oi:,.0f} | "
-                f"5m: {change_5m:+.2f}% | 1h: {change_1h:+.2f}% | 4h: {change_4h:+.2f}%"
-            )
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error fetching Open Interest: {e}")
-            return self._get_cached_oi_or_default()
-    
-    def _calculate_oi_change(self, minutes):
-        """Вычисляет изменение OI за указанный период"""
-        try:
-            history = self._oi_cache['history']
-            if len(history) < 2:
-                return 0.0
-            
-            now = datetime.now()
-            target_time = now - timedelta(minutes=minutes)
-            
-            # Находим ближайшую запись к целевому времени
-            closest = min(
-                history,
-                key=lambda x: abs((x['timestamp'] - target_time).total_seconds())
-            )
-            
-            current_oi = history[-1]['value']
-            past_oi = closest['value']
-            
-            if past_oi == 0:
-                return 0.0
-            
-            change = ((current_oi - past_oi) / past_oi) * 100
-            return round(change, 2)
-            
-        except Exception as e:
-            logger.debug(f"Error calculating OI change: {e}")
-            return 0.0
-    
-    def _get_cached_oi_or_default(self):
-        """Возвращает кэшированный OI или дефолтные значения"""
-        if self._oi_cache['value']:
-            logger.warning("Using cached OI value")
-            return self._oi_cache['value']
-        else:
-            logger.warning("No OI cache available, returning defaults")
-            return {
-                'value': 0,
-                'change_5m': 0.0,
-                'change_1h': 0.0,
-                'change_4h': 0.0,
-                'timestamp': datetime.now()
-            }
-    
-    def calculate_price_change(self, df, periods=12):
-        """
-        Рассчитывает изменение цены за N периодов
-        
-        Args:
-            df: DataFrame с ценами
-            periods: Количество периодов назад
-            
-        Returns:
-            float: Процент изменения цены
-        """
-        if df is None or len(df) < periods:
-            logger.warning(f"Not enough data for price change calculation: {len(df) if df is not None else 0} < {periods}")
-            return 0
-        
-        current_price = df['close'].iloc[-1]
-        past_price = df['close'].iloc[-periods]
-        
-        if past_price == 0:
-            logger.warning("Past price is 0, cannot calculate change")
-            return 0
-        
-        change = ((current_price - past_price) / past_price) * 100
-        return round(change, 2)
-    
-    def get_market_data(self, timeframe=None, limit=None):
-        """
-        Собирает все необходимые данные для анализа
-        
-        ✅ ИСПРАВЛЕНО: Динамический расчёт периодов в зависимости от таймфрейма
-        
-        Args:
-            timeframe: Таймфрейм свечей (опционально, берётся из config)
-            limit: Количество свечей (опционально, по умолчанию 100)
-        
-        Returns:
-            dict: Полный набор данных для ML модели
+        Собирает ВСЕ данные для анализа в одну структуру асинхронно
         """
         logger.info("Collecting market data...")
         
-        # Используем переданный таймфрейм или из config
         tf = timeframe or config.TIMEFRAME
         lm = limit or 100
         
-        # ✅ Динамический расчёт периодов в зависимости от таймфрейма
-        timeframe_minutes = {
-            '1m': 1,
-            '3m': 3,
-            '5m': 5,
-            '15m': 15,
-            '30m': 30,
-            '1h': 60,
-            '2h': 120,
-            '4h': 240,
-            '1d': 1440
-        }
-        
-        tf_min = timeframe_minutes.get(tf, 5)  # Default 5m если неизвестный
-        
-        # Рассчитываем периоды для 1h и 4h
-        periods_1h = max(1, 60 // tf_min)   # Защита от деления на 0
-        periods_4h = max(1, 240 // tf_min)
-        
-        logger.info(f"Timeframe: {tf} ({tf_min} min), Periods: 1h={periods_1h}, 4h={periods_4h}")
-        
-        # Получаем OHLCV данные
-        df = self.get_ohlcv_data(timeframe=tf, limit=lm)
-        if df is None:
-            logger.error("Failed to fetch OHLCV data")
-            return None
-        
-        # Текущая цена и объем
-        current = self.get_current_price()
-        if current is None:
-            logger.error("Failed to fetch current price")
-            return None
-
-        # Расчёт метрик объёма относительно среднего
         try:
-            avg_volume = df['volume'].rolling(window=config.VOLUME_MA_PERIOD).mean().iloc[-1]
-            current_vol = float(df['volume'].iloc[-1])
-            if avg_volume and avg_volume > 0:
-                volume_ratio = current_vol / avg_volume
+            # Параллельный запуск независимых задач
+            # 1. Основные
+            ohlcv_task = asyncio.create_task(self.get_ohlcv_data(timeframe=tf, limit=lm))
+            price_task = asyncio.create_task(self.get_current_price())
+            ob_task = asyncio.create_task(self.get_order_book())
+            fg_task = asyncio.create_task(self.get_fear_greed_index())
+            oi_task = asyncio.create_task(self.get_open_interest())
+            stats_task = asyncio.create_task(self.get_24h_stats())
+            
+            # Ожидание
+            df = await ohlcv_task
+            current = await price_task
+            orderbook = await ob_task
+            fear_greed = await fg_task
+            open_interest = await oi_task
+            stats_24h = await stats_task
+            
+            if df is None or df.empty:
+                logger.error("Failed to get OHLCV data")
+                return None
+                
+            if current is None:
+                current = {
+                    'price': df['close'].iloc[-1],
+                    'volume': df['volume'].iloc[-1],
+                    'timestamp': df['timestamp'].iloc[-1]
+                }
+            
+            # Расчеты (CPU bound часть - очень быстрая, можно оставить синхронно)
+            # Периоды
+            timeframe_minutes = {'1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+            tf_min = timeframe_minutes.get(tf, 5)
+            periods_1h = max(1, 60 // tf_min)
+            periods_4h = max(1, 240 // tf_min)
+            
+            price_change_1h = self.calculate_price_change(df, periods=periods_1h)
+            price_change_4h = self.calculate_price_change(df, periods=periods_4h)
+            
+            # Volume ratio
+            try:
+                avg_volume = df['volume'].rolling(window=config.VOLUME_MA_PERIOD).mean().iloc[-1]
+                current_vol = float(df['volume'].iloc[-1])
+                volume_ratio = (current_vol / avg_volume) if avg_volume > 0 else 1.0
                 volume_change_pct = (volume_ratio - 1.0) * 100.0
-            else:
+            except:
                 volume_ratio = 1.0
                 volume_change_pct = 0.0
+            
+            market_data = {
+                'df': df,
+                'current_price': current['price'],
+                'current_volume': current['volume'],
+                'timestamp': current['timestamp'],
+                'fear_greed': fear_greed,
+                'price_change_1h': price_change_1h,
+                'price_change_4h': price_change_4h,
+                'stats_24h': stats_24h,
+                'orderbook': orderbook,
+                'open_interest': open_interest['value'],
+                'oi_change_5m': open_interest['change_5m'],
+                'oi_change_1h': open_interest['change_1h'],
+                'oi_change_4h': open_interest['change_4h'],
+                'volume_ratio': volume_ratio,
+                'volume_change_pct': round(volume_change_pct, 1),
+                'timeframe': tf,
+                'timeframe_minutes': tf_min,
+                'periods_1h': periods_1h,
+                'periods_4h': periods_4h
+            }
+            
+            logger.info(f"Market data collected: Price=${current['price']:.2f}, F&G={fear_greed}")
+            return market_data
+            
         except Exception as e:
-            logger.debug(f"Volume metrics calc error: {e}")
-            volume_ratio = 1.0
-            volume_change_pct = 0.0
-        
-        # Fear & Greed Index (с кэшем)
-        fear_greed = self.get_fear_greed_index()
-        
-        # 24h статистика
-        stats_24h = self.get_24h_stats()
-        
-        # Orderbook
-        orderbook = self.get_orderbook()
-        
-        # ✅ Open Interest (НОВОЕ!)
-        open_interest = self.get_open_interest()
-        
-        # ✅ Изменение цены с правильными периодами
-        price_change_1h = self.calculate_price_change(df, periods=periods_1h)
-        price_change_4h = self.calculate_price_change(df, periods=periods_4h)
-        
-        market_data = {
-            'df': df,
-            'current_price': current['price'],
-            'current_volume': current['volume'],
-            'timestamp': current['timestamp'],
-            'fear_greed': fear_greed,
-            'price_change_1h': price_change_1h,
-            'price_change_4h': price_change_4h,
-            'stats_24h': stats_24h,
-            'orderbook': orderbook,
-            # ✅ НОВОЕ: Open Interest
-            'open_interest': open_interest['value'],
-            'oi_change_5m': open_interest['change_5m'],
-            'oi_change_1h': open_interest['change_1h'],
-            'oi_change_4h': open_interest['change_4h'],
-            # ✅ Метрики объёма
-            'volume_ratio': volume_ratio,
-            'volume_change_pct': round(volume_change_pct, 1),
-            # ✅ Метаданные для отладки
-            'timeframe': tf,
-            'timeframe_minutes': tf_min,
-            'periods_1h': periods_1h,
-            'periods_4h': periods_4h
-        }
-        
-        logger.info(f"Market data collected: Price=${current['price']:,.2f}, "
-                    f"Change 1h={price_change_1h}% ({periods_1h} periods), "
-                    f"Change 4h={price_change_4h}% ({periods_4h} periods)")
-        
-        return market_data
+            logger.error(f"Critical error in get_market_data: {e}")
+            import traceback
+            traceback.print_exc()
+            return None

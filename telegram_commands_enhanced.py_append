@@ -1,0 +1,74 @@
+
+async def report_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерирует и отправляет отчет о производительности"""
+    try:
+        message = update.message if update.message else update.callback_query.message
+        
+        # Imports
+        from database_analytics import DatabaseAnalytics
+        from report_generator import ReportGenerator
+        import os
+        
+        db_analytics = DatabaseAnalytics()
+        report_gen = ReportGenerator()
+        
+        await self.send_with_retry(
+            chat_id=message.chat_id,
+            text="📊 Генерирую отчет и графики, подождите..."
+        )
+        
+        # 1. Get Data
+        signals_df = db_analytics.get_signals_for_analysis(days=30)
+        
+        if signals_df is None or len(signals_df) == 0:
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="❌ Нет данных за последние 30 дней для генерации отчета"
+            )
+            return
+
+        # 2. Export CSV
+        csv_file = report_gen.export_to_csv(signals_df)
+        
+        # 3. Generate Charts help via equity data
+        equity_df = db_analytics.get_equity_curve(days=30, initial_capital=1000)
+        chart_file = report_gen.generate_equity_curve_chart(equity_df)
+        dd_file = report_gen.generate_drawdown_chart(equity_df)
+        
+        # 4. Send Files
+        sent_count = 0
+        
+        if csv_file and os.path.exists(csv_file):
+            await message.reply_document(
+                document=open(csv_file, 'rb'),
+                caption="📊 История сигналов (CSV)"
+            )
+            sent_count += 1
+            # Cleanup later or now? Better let OS handle temp or cron, but here we keep simple
+            
+        if chart_file and os.path.exists(chart_file):
+            await message.reply_photo(
+                photo=open(chart_file, 'rb'),
+                caption="📈 Кривая капитала (Equity Curve)"
+            )
+            sent_count += 1
+            
+        if dd_file and os.path.exists(dd_file):
+            await message.reply_photo(
+                photo=open(dd_file, 'rb'),
+                caption="📉 График просадки (Drawdown)"
+            )
+            sent_count += 1
+            
+        if sent_count == 0:
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="❌ Не удалось сгенерировать файлы отчета"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in report command: {e}", exc_info=True)
+        await self.send_with_retry(
+            chat_id=message.chat_id,
+            text="❌ Произошла ошибка при генерации отчета"
+        )

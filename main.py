@@ -5,6 +5,7 @@ from logging.handlers import RotatingFileHandler
 from data_collector import DataCollector
 from indicators import TechnicalIndicators
 from ml_model import MLPredictor
+from paper_trader import PaperTrader
 from telegram_bot import TelegramBot
 from database import Database
 from healthcheck import HealthCheck
@@ -59,6 +60,9 @@ class BTCPumpDumpBot:
         # Флаг для graceful shutdown
         self.shutdown_requested = False
         
+        # Paper Trading Engine (Phase 3)
+        self.paper_trader = PaperTrader(self.db)
+        
         logger.info("BTCPumpDumpBot initialized")
 
     def set_trading_mode(self, mode):
@@ -84,7 +88,7 @@ class BTCPumpDumpBot:
             logger.info(f"Starting market analysis (mode={mode})...")
             
             # 1. Собираем данные c учётом режима
-            market_data = self.data_collector.get_market_data(
+            market_data = await self.data_collector.get_market_data(
                 timeframe=params['timeframe'],
                 limit=params['limit']
             )
@@ -155,7 +159,7 @@ class BTCPumpDumpBot:
             logger.info("Starting market analysis...")
             
             # 1. Собираем данные
-            market_data = self.data_collector.get_market_data()
+            market_data = await self.data_collector.get_market_data()
             if not market_data:
                 logger.error("Failed to collect market data")
                 return None
@@ -260,6 +264,18 @@ class BTCPumpDumpBot:
             price=analysis_result['market_data']['current_price'],
             confidence=prediction['confidence']
         )
+
+        # ----------------------------------------
+        # Paper Trading Trigger
+        # ----------------------------------------
+        try:
+            self.paper_trader.open_position(
+                signal_type=prediction['signal'],
+                current_price=analysis_result['market_data']['current_price'],
+                probability=prediction['probability']
+            )
+        except Exception as e:
+            logger.error(f"Paper Trading Error: {e}")
         
         await self.telegram_bot.send_signal_to_users(
             prediction,
@@ -297,6 +313,13 @@ class BTCPumpDumpBot:
                 
                 # Проверяем и отправляем сигналы
                 await self.check_and_send_signal(analysis_result)
+                
+                # Paper Trading: Check exits (SL/TP) every loop
+                current_price = analysis_result['market_data']['current_price']
+                try:
+                    self.paper_trader.update_positions(current_price)
+                except Exception as e:
+                    logger.error(f"Paper Trader Update Error: {e}")
                 
                 # Ждём следующей проверки (джиттер, отдельный базовый интервал для day)
                 base_interval = config.CHECK_INTERVAL if mode != 'day' else config.DAY_CHECK_INTERVAL
@@ -398,6 +421,10 @@ class BTCPumpDumpBot:
                 # Останавливаем healthcheck сервер
                 logger.info("Stopping healthcheck server...")
                 await self.healthcheck.stop()
+                
+                # Закрываем соединение с биржей
+                if hasattr(self.data_collector, 'close'):
+                    await self.data_collector.close()
                 
                 logger.info("✅ Bot stopped gracefully")
                 

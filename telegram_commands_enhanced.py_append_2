@@ -1,0 +1,156 @@
+
+async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Проводит анализ текущего состояния рынка и отправляет отчет
+    """
+    try:
+        message = update.message if update.message else update.callback_query.message
+        
+        status_msg = await self.send_with_retry(
+            chat_id=message.chat_id,
+            text="🔍 Анализирую рынок, секунду..."
+        )
+        
+        # 1. Получаем свежие данные
+        # Используем self.data_collector который уже есть в боте
+        if not hasattr(self, 'data_collector') or self.data_collector is None:
+             # Fallback if somehow missing
+             from data_collector import DataCollector
+             self.data_collector = DataCollector()
+             
+        market_data = self.data_collector.get_market_data()
+        
+        if not market_data:
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="⚠️ Не удалось получить данные с биржи."
+            )
+            return
+
+        # 2. Считаем индикаторы
+        from indicators import TechnicalIndicators
+        indicators = TechnicalIndicators.calculate_all_indicators(
+            market_data['df'],
+            orderbook=market_data.get('orderbook'),
+            mode='swing'
+        )
+        
+        if not indicators:
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="⚠️ Не удалось рассчитать индикаторы."
+            )
+            return
+            
+        # 3. Делаем прогноз
+        # Используем self.ml_predictor
+        if not hasattr(self, 'ml_predictor') or self.ml_predictor is None:
+             from ml_model import MLPredictor
+             self.ml_predictor = MLPredictor()
+             
+        prediction = self.ml_predictor.predict(indicators, market_data, mode='swing')
+        
+        # 4. Формируем отчет
+        price = market_data['current_price']
+        price_change_24h = market_data.get('stats_24h', {}).get('price_change_24h', 0)
+        
+        # Emojis
+        rsi = indicators.get('rsi', 50)
+        rsi_emoji = "🔴" if rsi > 70 else "🟢" if rsi < 30 else "⚪"
+        
+        macd = indicators.get('macd', 0)
+        signal = indicators.get('macd_signal', 0)
+        macd_emoji = "📈" if macd > signal else "📉"
+        
+        signal_type = prediction['signal']
+        sig_emoji = "🚀" if signal_type == "PUMP" else "🔻" if signal_type == "DUMP" else "😴"
+        
+        text = f"""
+🔎 **ТЕКУЩИЙ АНАЛИЗ РЫНКА**
+━━━━━━━━━━━━━━━━
+
+💰 **Цена**: ${price:,.2f} ({price_change_24h:+.2f}%)
+
+📊 **Индикаторы**:
+• RSI (14): {rsi:.1f} {rsi_emoji}
+• MACD: {macd:.1f} {macd_emoji}
+• Bollinger: {self._get_bb_status(indicators)}
+
+🤖 **Мнение Бота**:
+• Сигнал: **{signal_type}** {sig_emoji}
+• Уверенность: {prediction['confidence']}
+• Вероятность: {prediction['probability']:.1%}
+
+🕒 Данные на: {datetime.utcnow().strftime('%H:%M:%S UTC')}
+"""
+        # Удаляем сообщение о загрузке и отправляем отчет
+        try:
+            await context.bot.delete_message(chat_id=message.chat_id, message_id=status_msg.message_id)
+        except:
+            pass
+            
+        await self.send_with_retry(chat_id=message.chat_id, text=text)
+
+    except Exception as e:
+        logger.error(f"Error in analyze command: {e}", exc_info=True)
+        await self.send_with_retry(
+            chat_id=message.chat_id,
+            text="❌ Ошибка при анализе."
+        )
+
+
+async def history_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Показывает историю последних сигналов
+    """
+    try:
+        message = update.message if update.message else update.callback_query.message
+        
+        from database_analytics import DatabaseAnalytics
+        db = DatabaseAnalytics()
+        
+        # Получаем последние 10 сигналов
+        # Нам не нужны детальные price data, но используем get_signals_for_analysis для удобства
+        # либо добавим простой метод в db. 
+        # Используем существующий get_recent_signals если есть?
+        # В DatabaseAnalytics есть get_signals_for_analysis
+        
+        signals_df = db.get_signals_for_analysis(days=7) # Last 7 days
+        
+        if signals_df is None or len(signals_df) == 0:
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="📭 История сигналов пуста за последние 7 дней."
+            )
+            return
+            
+        # Sort by latest first and take top 10
+        latest_signals = signals_df.sort_values('timestamp', ascending=False).head(10)
+        
+        text = "📜 **ИСТОРИЯ СИГНАЛОВ (Последние 10)**\n\n"
+        
+        for _, row in latest_signals.iterrows():
+            ts = pd.to_datetime(row['timestamp']).strftime('%d.%m %H:%M')
+            sig_type = row['signal_type']
+            emoji = "🟢" if sig_type == "PUMP" else "🔴"
+            price = row['price']
+            
+            # Result (если есть exit_price и PnL)
+            result_str = ""
+            if 'pnl' in row and pd.notnull(row['pnl']):
+                pnl = row['pnl']
+                res_emoji = "✅" if pnl > 0 else "❌"
+                result_str = f"| {res_emoji} ${pnl:.2f}"
+            
+            text += f"{ts} | {emoji} {sig_type} | ${price:,.0f} {result_str}\n"
+            
+        text += "\nИспользуйте /stats для полной статистики."
+        
+        await self.send_with_retry(chat_id=message.chat_id, text=text)
+
+    except Exception as e:
+        logger.error(f"Error in history command: {e}", exc_info=True)
+        await self.send_with_retry(
+            chat_id=message.chat_id,
+            text="❌ Ошибка при получении истории."
+        )

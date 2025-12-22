@@ -5,7 +5,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram Bot Token (получить у @BotFather)
-TELEGRAM_BOT_TOKEN = os.getenv('7410301345:AAGcXIHsOWuqVypqbtZk5izkPpLdGNU8y8M', 'YOUR_BOT_TOKEN_HERE')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+    raise ValueError(
+        "❌ TELEGRAM_BOT_TOKEN не настроен!\n"
+        "Создайте файл .env и добавьте:\n"
+        "TELEGRAM_BOT_TOKEN=ваш_токен_от_BotFather"
+    )
 
 # Binance API (опционально, для получения данных используем публичный API)
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -13,6 +19,8 @@ BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 
 # ✅ НОВОЕ: Режим торговли по умолчанию
 TRADING_MODE = os.getenv('TRADING_MODE', 'swing')  # 'swing' или 'day'
+if TRADING_MODE not in ['swing', 'day']:
+    raise ValueError(f"❌ TRADING_MODE должен быть 'swing' или 'day', получено: {TRADING_MODE}")
 
 # Настройки торговой пары
 SYMBOL = 'BTC/USDT'
@@ -33,9 +41,18 @@ OB_IMBALANCE_THRESHOLD = 0.10
 VOLUME_SPIKE_RATIO = 2.5
 # Порог "низкой волатильности" через ATR относительно цены (0.5%)
 ATR_LOW_RATIO = 0.005
-# Пороги для сигналов
-PUMP_THRESHOLD = 0.70  # 70% вероятность для сигнала PUMP
-DUMP_THRESHOLD = 0.70  # 70% вероятность для сигнала DUMP
+
+# Пороги для сигналов (можно переопределить в .env)
+# Для day trading рекомендуется 55-60%, для swing 65-70%
+default_threshold = 0.60 if TRADING_MODE == 'day' else 0.70
+PUMP_THRESHOLD = float(os.getenv('PUMP_THRESHOLD', default_threshold))
+DUMP_THRESHOLD = float(os.getenv('DUMP_THRESHOLD', default_threshold))
+
+# Валидация порогов
+if not (0.0 <= PUMP_THRESHOLD <= 1.0):
+    raise ValueError(f"❌ PUMP_THRESHOLD должен быть между 0 и 1, получено: {PUMP_THRESHOLD}")
+if not (0.0 <= DUMP_THRESHOLD <= 1.0):
+    raise ValueError(f"❌ DUMP_THRESHOLD должен быть между 0 и 1, получено: {DUMP_THRESHOLD}")
 
 # Минимальное изменение цены для классификации (в процентах)
 MIN_PRICE_CHANGE_PUMP = 3.0  # 3% рост
@@ -59,10 +76,10 @@ MODE_CONFIGS = {
         'min_price_change': 3.0
     },
     'day': {
-        'timeframe': '1m',
+        'timeframe': '5m', # Align with Model (5m)
         'check_interval': 60,   # 1 минута
-        'pump_threshold': 0.75,  # Выше порог для большей точности
-        'dump_threshold': 0.75,
+        'pump_threshold': 0.60,  # Lower threshold for more frequency
+        'dump_threshold': 0.60,
         'min_price_change': 1.5  # Меньше минимальное изменение
     }
 }

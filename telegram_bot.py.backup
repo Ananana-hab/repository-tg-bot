@@ -5,13 +5,6 @@ import logging
 from database import Database
 from datetime import datetime
 import asyncio
-from telegram_commands_enhanced import (
-    stats_command_enhanced, 
-    performance_command, 
-    report_command,
-    analyze_command,
-    history_command
-)
 
 logging.basicConfig(level=config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -117,7 +110,6 @@ class TelegramBot:
 📊 Команды:
 /status - Текущий анализ BTC
 /stats - Статистика и точность
-/performance - Детальный анализ
 /subscribe - Включить уведомления
 /unsubscribe - Отключить уведомления
 /settings - Настройки
@@ -190,19 +182,54 @@ class TelegramBot:
         
         await self.send_with_retry(chat_id=message.chat_id, text=status_text)
     
-    # Enhanced stats command with performance metrics
-    stats_command = stats_command_enhanced
-    
-    # Detailed performance analysis command
-    performance_command = performance_command
-    
-    # Report generation command
-    report_command = report_command
-    
-    # New interactive commands
-    analyze_command = analyze_command
-    history_command = history_command
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает статистику сигналов"""
+        try:
+            message = update.message if update.message else update.callback_query.message
+            
+            # Получаем статистику из БД
+            stats = self.db.get_signals_stats(days=30)
+            if not stats:
+                await self.send_with_retry(
+                    chat_id=message.chat_id,
+                    text="⚠️ Ошибка получения статистики"
+                )
+                return
 
+            total_signals = sum(s['count'] for s in stats.values())
+            if total_signals == 0:
+                await self.send_with_retry(
+                    chat_id=message.chat_id,
+                    text="📊 Статистика пока недоступна - нет сигналов за последние 30 дней"
+                )
+                return
+
+            stats_text = "📊 Статистика сигналов за месяц:\n\n"
+            
+            for signal_type, data in stats.items():
+                count = data['count']
+                if count > 0:
+                    avg_prob = data['avg_probability']
+                    high_conf = data['high_confidence']
+                    
+                    stats_text += f"{signal_type} сигналы:\n"
+                    stats_text += f"• Количество: {count}\n"
+                    stats_text += f"• Средняя вероятность: {avg_prob:.1%}\n"
+                    stats_text += f"• Высокая уверенность: {high_conf:.1f}%\n"
+                    stats_text += "\n"
+
+            stats_text += f"📈 Всего сигналов: {total_signals}\n"
+            stats_text += f"⏰ {datetime.utcnow().strftime('%H:%M:%S UTC')}"
+
+            await self.send_with_retry(chat_id=message.chat_id, text=stats_text)
+
+        except Exception as e:
+            logger.error(f"Error in stats command: {e}")
+            await self.send_with_retry(
+                chat_id=message.chat_id,
+                text="❌ Произошла ошибка при получении статистики"
+            )
+    
     async def subscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Подписывает пользователя на уведомления"""
         message = update.message if update.message else update.callback_query.message
@@ -251,10 +278,6 @@ class TelegramBot:
 /start - Перезапустить бота
 /status - Текущий анализ BTC
 /stats - Статистика сигналов
-/performance - Детальный анализ
-/report - Отчет CSV и графики
-/analyze - Текущий анализ рынка
-/history - История сигналов
 /subscribe - Включить уведомления
 /unsubscribe - Отключить уведомления 
 /settings - Настройки уведомлений
@@ -714,10 +737,6 @@ ${market_data['current_price']:,.2f} {direction} {market_data['price_change_1h']
         self.app.add_handler(CommandHandler('start', self.start_command))
         self.app.add_handler(CommandHandler('status', self.status_command))
         self.app.add_handler(CommandHandler('stats', self.stats_command))
-        self.app.add_handler(CommandHandler('performance', self.performance_command))
-        self.app.add_handler(CommandHandler('report', self.report_command))
-        self.app.add_handler(CommandHandler('analyze', self.analyze_command))
-        self.app.add_handler(CommandHandler('history', self.history_command))
         self.app.add_handler(CommandHandler('subscribe', self.subscribe_command))
         self.app.add_handler(CommandHandler('unsubscribe', self.unsubscribe_command))
         self.app.add_handler(CommandHandler('settings', self.settings_command))

@@ -15,3 +15,7 @@ psutil>=5.9.0  # For system metrics
 # Optional but recommended
 ta>=0.11.0  # Technical Analysis library
 pyarrow>=14.0.0  # For parquet file support (dataset storage)
+
+# ✅ Phase 2: ML improvements
+xgboost>=2.0.0  # Gradient boosting for improved predictions
+imbalanced-learn>=0.11.0 # For SMOTE (class balancing)
