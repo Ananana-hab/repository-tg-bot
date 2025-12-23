@@ -27,7 +27,7 @@ class DataCollectionService:
         """Собирает данные и сохраняет в БД"""
         try:
             # Получаем рыночные данные
-            market_data = self.data_collector.get_market_data()
+            market_data = await self.data_collector.get_market_data()
             
             if not market_data or market_data.get('df') is None:
                 logger.warning("Failed to collect market data")
